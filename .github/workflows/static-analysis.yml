@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "app/**/*.py"
+      - "tests/**/*.py"
       - "infra/**/*.py"
       - "Taskfile.yaml"
       - "pyproject.toml"
@@ -14,6 +15,7 @@ on:
       - main
     paths:
       - "app/**/*.py"
+      - "tests/**/*.py"
       - "infra/**/*.py"
       - "Taskfile.yaml"
       - "pyproject.toml"
@@ -46,4 +48,7 @@ jobs:
           python3 -m pip install -r requirements-dev.txt
 
       - name: Run static analysis
-        run: task app:check
+        run: |
+          task app:lint
+          task app:typecheck
+          python3 -m pytest -q
