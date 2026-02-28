@@ -39,7 +39,8 @@ def _run_exists(run_id: str) -> bool:
 def handler(event, _context):
     trace_id = trace_id_from_event(event)
     step = "GET_RUN_ARTIFACTS"
-    run_id = (event.get("pathParameters") or {}).get("run_id")
+    run_id_value = (event.get("pathParameters") or {}).get("run_id")
+    run_id = run_id_value if isinstance(run_id_value, str) else None
 
     if not is_valid_run_id(run_id):
         return problem_response(
@@ -51,6 +52,8 @@ def handler(event, _context):
             step=step,
             trace_id=trace_id,
         )
+
+    assert run_id is not None
 
     logger.info(json.dumps({"trace_id": trace_id, "step": step, "run_id": run_id}))
     if not _run_exists(run_id):

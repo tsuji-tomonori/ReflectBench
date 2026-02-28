@@ -51,13 +51,17 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Install Python dependencies
-        run: uv sync --frozen --group docs
+        run: uv sync --frozen --group docs --group infra
 
-      - name: Install infra dependencies
+      - name: Setup Node.js
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "aws-cdk-lib==2.*" "constructs==10.4.2"
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install AWS CDK CLI
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
+        run: npm install -g aws-cdk
 
       - name: Run docs guard (default)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.execute_deploy != 'true'
@@ -68,6 +72,7 @@ jobs:
         run: |
           test -n "${{ vars.AWS_ROLE_ARN }}" || { echo "Missing variable: AWS_ROLE_ARN"; exit 1; }
           test -n "${AWS_REGION}" || { echo "Missing variable: AWS_REGION"; exit 1; }
+          test -n "${DOCS_SITE_URL}" || { echo "Missing variable: DOCS_SITE_URL"; exit 1; }
 
       - name: Configure AWS credentials (OIDC)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'

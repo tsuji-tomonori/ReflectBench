@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-DEFAULT_EDITOR_MODEL = "apac.amazon.nova-micro-v1:0"
+DEFAULT_EDITOR_MODEL: Literal["apac.amazon.nova-micro-v1:0"] = "apac.amazon.nova-micro-v1:0"
 DEFAULT_MODELS = [
     "apac.amazon.nova-micro-v1:0",
     "google.gemma-3-12b-it",
