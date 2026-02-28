@@ -1,0 +1,49 @@
+name: Static Analysis
+
+on:
+  pull_request:
+    paths:
+      - "app/**/*.py"
+      - "infra/**/*.py"
+      - "Taskfile.yaml"
+      - "pyproject.toml"
+      - "requirements-dev.txt"
+      - ".github/workflows/static-analysis.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**/*.py"
+      - "infra/**/*.py"
+      - "Taskfile.yaml"
+      - "pyproject.toml"
+      - "requirements-dev.txt"
+      - ".github/workflows/static-analysis.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  python-static-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Task
+        uses: go-task/setup-task@v1
+
+      - name: Install tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
+
+      - name: Run static analysis
+        run: task app:check

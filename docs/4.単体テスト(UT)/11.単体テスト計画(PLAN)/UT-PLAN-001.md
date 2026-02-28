@@ -3,7 +3,7 @@ id: UT-PLAN-001
 title: 単体テスト仕様書（run実行基盤）
 doc_type: 単体テスト計画
 phase: UT
-version: 1.0.3
+version: 1.0.4
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -94,7 +94,7 @@ tags:
 | UT-CASE-BE-001 | `POST /runs` | 正常起動 | 固定条件入力 | `202` + `run_id` + `QUEUED` |
 | UT-CASE-BE-002 | `POST /runs` | バリデーション | `loops != 10` | `400` |
 | UT-CASE-BE-003 | `POST /runs` | 冪等 | 同一 `idempotency_key` 再送 | 同一 `run_id` |
-| UT-CASE-BE-004 | `GET /runs/{run_id}` | 状態参照 | 既存 `run_id` | `phase/state/progress/last_error` を返す |
+| UT-CASE-BE-004 | `GET /runs/{run_id}` | 状態参照 | 既存 `run_id` | DynamoDB正本の `phase/state/progress/last_error` を返す |
 | UT-CASE-BE-005 | `GET /runs/{run_id}` | Not Found | 未知 `run_id` | `404` |
 | UT-CASE-BE-006 | `GET /runs/{run_id}/artifacts` | 空応答 | 成果物未生成 | `200` + 空配列 |
 | UT-CASE-APP-001 | orchestration | step遷移 | 正常step列 | 最終 `SUCCEEDED` |
@@ -120,7 +120,7 @@ tags:
 ## 実行手順
 1. 単体テスト実行（アプリ）
 2. カバレッジ計測
-3. 静的解析（型・lint）
+3. 静的解析（型・lint: `task app:check`）
 4. docs整合チェック（`task docs:guard`）
 
 ## 完了条件
@@ -129,6 +129,7 @@ tags:
 - 失敗時の再試行/部分成功/エラー記録の挙動が再現可能である。
 
 ## 変更履歴
+- 2026-02-28: 静的解析手順に `task app:check`（ruff + mypy）を追加 [[RQ-RDR-002]]
 - 2026-02-28: UTトレーサビリティマトリクス（UT-TRC-001）を追加 [[RQ-RDR-002]]
 - 2026-02-28: ペアワイズ設計文書（UT-PW）を追加し関連リンクを更新 [[RQ-RDR-002]]
 - 2026-02-28: UTケース文書（BE/APP 15件）への追跡リンクを追加 [[RQ-RDR-002]]

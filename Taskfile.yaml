@@ -5,16 +5,32 @@ vars:
   DOCS_SITE_URL: ''
 
 tasks:
+  app:lint:
+    desc: Run Python lint for app and infra
+    cmds:
+      - python3 -m ruff check app infra
+
+  app:typecheck:
+    desc: Run Python type check for app modules
+    cmds:
+      - python3 -m mypy
+
+  app:check:
+    desc: Run Python static analysis suite
+    cmds:
+      - task app:lint
+      - task app:typecheck
+
   docs:autolink:
     desc: Auto-link glossary terms in all docs
     cmds:
-      - python3 .opencode/skills/obsidian-doc-new/scripts/auto_link_glossary.py docs
+      - uv run --group docs python .opencode/skills/obsidian-doc-new/scripts/auto_link_glossary.py docs
 
   docs:autolink:check:
     desc: Ensure changed docs already satisfy glossary auto-link
     cmds:
       - |
-        python3 - <<'PY'
+        uv run --group docs python - <<'PY'
         import os
         import subprocess
         import sys
@@ -58,7 +74,7 @@ tasks:
         target_files = sorted(set(changed))
         before_content = {p: Path(p).read_text(encoding="utf-8") for p in target_files}
         subprocess.run([
-          "python3",
+          sys.executable,
           ".opencode/skills/obsidian-doc-new/scripts/auto_link_glossary.py",
           *target_files,
         ], check=True)
@@ -79,13 +95,13 @@ tasks:
   docs:check:
     desc: Validate docs frontmatter and wiki links
     cmds:
-      - python3 .opencode/skills/obsidian-doc-check/scripts/validate_vault.py --docs-root docs --report reports/doc_check.md
+      - uv run --group docs python .opencode/skills/obsidian-doc-check/scripts/validate_vault.py --docs-root docs --report reports/doc_check.md
 
   docs:check:changed:
     desc: Validate changed docs frontmatter and wiki links
     cmds:
       - |
-        python3 - <<'PY'
+        uv run --group docs python - <<'PY'
         import os
         import subprocess
         import sys
@@ -100,7 +116,7 @@ tasks:
             path = line.strip()
             if not path.startswith("docs/") or not path.endswith(".md"):
               continue
-            if path.endswith("/README.md") or path.endswith("/TEMPLATE.md"):
+            if path.endswith("/README.md") or path.endmd") or path.endswith("/TEMPLATE.md"):
               continue
             out.append(path)
           return out
@@ -126,7 +142,7 @@ tasks:
           sys.exit(0)
 
         subprocess.run([
-          "python3",
+          sys.executable,
           ".opencode/skills/obsidian-doc-check/scripts/validate_vault.py",
           "--docs-root",
           "docs",
@@ -144,15 +160,14 @@ tasks:
       - task docs:check:changed
 
   infra:deploy:ci:
-    desc: Placeholder deploy task for CI/CD skeleton
+    desc: Synthesize infra stack in CI
     cmds:
       - |
         bash -lc 'if [ ! -d "{{.INFRA_DIR}}" ]; then
-          echo "INFRA_DIR not found; skipping deploy in skeleton mode."
+          echo "INFRA_DIR not found; skipping infra synth."
           exit 0
         fi
-        echo "INFRA_DIR exists but deploy task is not implemented yet."
-        exit 1'
+        uv run --group infra python "{{.INFRA_DIR}}/app.py"'
 
   docs:verify:
     desc: Verify deployed docs top page (optional DOCS_SITE_URL)

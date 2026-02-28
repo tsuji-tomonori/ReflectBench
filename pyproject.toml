@@ -1,0 +1,47 @@
+[project]
+name = "reflectbench"
+version = "0.1.0"
+description = "ReflectBench project workspace"
+requires-python = ">=3.11"
+
+[dependency-groups]
+dev = [
+  "mypy==1.18.2",
+  "ruff==0.13.3",
+]
+infra = [
+  "aws-cdk-lib==2.*",
+  "constructs>=10.0.0,<11.0.0",
+]
+docs = [
+  "PyYAML>=6,<7",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+exclude = [
+  ".git",
+  ".ai_workspace",
+  ".opencode",
+]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.13"
+files = ["app"]
+exclude = ["^\\.ai_workspace/", "^\\.opencode/"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
