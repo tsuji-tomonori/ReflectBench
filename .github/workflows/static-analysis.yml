@@ -8,7 +8,7 @@ on:
       - "infra/**/*.py"
       - "Taskfile.yaml"
       - "pyproject.toml"
-      - "requirements-dev.txt"
+      - "uv.lock"
       - ".github/workflows/static-analysis.yml"
   push:
     branches:
@@ -19,7 +19,7 @@ on:
       - "infra/**/*.py"
       - "Taskfile.yaml"
       - "pyproject.toml"
-      - "requirements-dev.txt"
+      - "uv.lock"
       - ".github/workflows/static-analysis.yml"
 
 permissions:
@@ -39,16 +39,14 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Install Task
         uses: go-task/setup-task@v1
 
       - name: Install tooling
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-dev.txt
+        run: uv sync --frozen --group dev
 
       - name: Run static analysis
-        run: |
-          task app:lint
-          task app:typecheck
-          python3 -m pytest -q
+        run: uv run --group dev task app:check
