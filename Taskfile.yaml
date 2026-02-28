@@ -1,0 +1,18 @@
+version: '3'
+
+tasks:
+  docs:autolink:
+    desc: Auto-link glossary terms in all docs
+    cmds:
+      - python3 .opencode/skills/obsidian-doc-new/scripts/auto_link_glossary.py docs
+
+  docs:check:
+    desc: Validate docs frontmatter and wiki links
+    cmds:
+      - python3 .opencode/skills/obsidian-doc-check/scripts/validate_vault.py --docs-root docs --report reports/doc_check.md
+
+  docs:guard:
+    desc: Run docs auto-link and validation
+    cmds:
+      - task docs:autolink
+      - task docs:check

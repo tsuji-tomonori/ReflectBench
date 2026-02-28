@@ -1,0 +1,62 @@
+---
+id: RQ-PP-001
+title: llm-temp-introspection の目的
+doc_type: プロジェクトの目的
+phase: RQ
+version: 1.0.1
+status: 下書き
+owner: RQ-SH-001
+created: 2026-02-28
+updated: '2026-02-28'
+up: []
+related:
+  - '[[RQ-RDR-001]]'
+  - '[[RQ-RDR-002]]'
+  - '[[RQ-SC-001]]'
+  - '[[RQ-PC-001]]'
+  - '[[RQ-FR-001]]'
+  - '[[RQ-AV-001-01]]'
+  - '[[BD-INF-DEP-001]]'
+  - '[[BD-INF-DEP-002]]'
+  - '[[DD-INF-DEP-001]]'
+  - '[[DD-INF-DEP-002]]'
+  - '[[DD-INF-OVR-001]]'
+  - '[[DD-INF-API-001]]'
+  - '[[DD-INF-DATA-001]]'
+  - '[[DD-APP-OVR-001]]'
+  - '[[DD-APP-API-001]]'
+  - '[[DD-APP-DATA-001]]'
+  - '[[OPSREL-RUN-001]]'
+tags:
+  - llm-temp-introspection
+  - RQ
+  - PP
+---
+
+## 目的
+- LLM の温度内省に関する Study1 / Study2 / 追加実験 A / D を、単一リージョンのフルサーバレス構成で再現可能に運用する。
+- 実験実行と成果物生成を Bedrock Batch Inference 中心へ統一し、長時間処理を Lambda Durable Functions で安定運用できる状態にする。
+
+## 成果物
+- 実行管理 API（`POST /runs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`）。
+- 実験成果物（`runs/{run_id}/...` 配下の [[RQ-GL-005|manifest]] / batch-output / normalized / reports）。
+- レポート成果物（`study1_summary.csv`, `study2_within.csv`, `study2_across.csv`, `experiment_a.csv`, `experiment_d.csv`, `run_manifest.json`）。
+
+## 成功条件
+- Study1 10 ループ、Study2 within/across 完全クロス、追加実験 A / D を同一 [[RQ-GL-002|run]] で完走できる。
+- 採用モデル（Nova Micro, Gemma 3 12B IT, Ministral 3 8B, Qwen3 32B）を `ap-southeast-2` で一貫して呼び出せる。
+- 実行中断や JSON 解析失敗が発生しても、[[RQ-GL-004|shard]] 単位で再試行または `invalid/` 退避により復旧できる。
+
+## 前提
+- リージョンは `ap-southeast-2` 固定。
+- `Qwen3 32B` は `qwen.qwen3-32b-v1:0` を使用。
+- 追加実験 A の editor は `apac.amazon.nova-micro-v1:0` 固定。
+- すべての LLM 実行は Bedrock Batch Inference を使用。
+- 環境は1環境のみで、常時開放は前提としない。
+- 利用者は[[RQ-SH-001|管理者]]のみとし、冗長化は採用しない。
+
+## 変更履歴
+- 2026-02-28: DD-INF/DD-APP への逆リンクを追加 [[RQ-RDR-002]]
+- 2026-02-28: プロジェクト制約（単一環境/管理者単独/非冗長）を前提へ追記 [[RQ-RDR-002]]
+- 2026-02-28: SC/FR/NFR への関連リンクを追加 [[RQ-RDR-002]]
+- 2026-02-28: 初版作成（plan.md の実装前提と POC の運用知見を統合） [[RQ-RDR-001]]
