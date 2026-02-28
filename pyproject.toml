@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "ReflectBench project workspace"
 requires-python = ">=3.11"
 dependencies = [
+  "boto3>=1.35,<2",
   "pydantic==2.11.9",
 ]
 
