@@ -1,0 +1,5 @@
+{"id":"json_predicted_label","expected":"HIGH","row":{"expected_label":"HIGH","modelOutput":{"content":[{"text":"{\"predicted_label\":\"HIGH\"}"}]}}}
+{"id":"plain_text_low","expected":"LOW","row":{"expected_label":"LOW","outputText":"prediction: low"}}
+{"id":"nested_response_high","expected":"HIGH","row":{"expected_label":"HIGH","response":{"body":{"messages":[{"content":[{"text":"The model judges this as HIGH confidence"}]}]}}}}
+{"id":"ambiguous_fallback","expected":"LOW","row":{"expected_label":"LOW","raw_text":"This could be high or low"}}
+{"id":"missing_label","expected":null,"row":{"expected_label":"HIGH","raw_text":"insufficient evidence"}}

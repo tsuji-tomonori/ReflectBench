@@ -3,15 +3,20 @@ name = "reflectbench"
 version = "0.1.0"
 description = "ReflectBench project workspace"
 requires-python = ">=3.11"
+dependencies = [
+  "pydantic==2.11.9",
+]
 
 [dependency-groups]
 dev = [
   "mypy==1.18.2",
+  "pydantic==2.11.9",
+  "pytest==8.4.2",
   "ruff==0.13.3",
 ]
 infra = [
   "aws-cdk-lib==2.*",
-  "constructs>=10.0.0,<11.0.0",
+  "constructs==10.4.2",
 ]
 docs = [
   "PyYAML>=6,<7",
@@ -45,3 +50,6 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

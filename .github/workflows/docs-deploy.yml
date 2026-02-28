@@ -47,10 +47,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Install Python dependencies
+        run: uv sync --frozen --group docs
+
+      - name: Install infra dependencies
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install "PyYAML>=6,<7"
+          python3 -m pip install "aws-cdk-lib==2.*" "constructs==10.4.2"
 
       - name: Run docs guard (default)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.execute_deploy != 'true'

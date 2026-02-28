@@ -15,11 +15,17 @@ tasks:
     cmds:
       - python3 -m mypy
 
+  app:test:
+    desc: Run Python test suite with pytest
+    cmds:
+      - python3 -m pytest -q
+
   app:check:
-    desc: Run Python static analysis suite
+    desc: Run Python static analysis and tests
     cmds:
       - task app:lint
       - task app:typecheck
+      - task app:test
 
   docs:autolink:
     desc: Auto-link glossary terms in all docs
@@ -167,7 +173,7 @@ tasks:
           echo "INFRA_DIR not found; skipping infra synth."
           exit 0
         fi
-        uv run --group infra python "{{.INFRA_DIR}}/app.py"'
+        python3 "{{.INFRA_DIR}}/app.py"'
 
   docs:verify:
     desc: Verify deployed docs top page (optional DOCS_SITE_URL)
