@@ -21,11 +21,13 @@ dynamodb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 bedrock = boto3.client("bedrock")
 lambda_client = boto3.client("lambda")
+cloudwatch = boto3.client("cloudwatch")
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
 BEDROCK_BATCH_ROLE_ARN = os.environ.get("BEDROCK_BATCH_ROLE_ARN")
 SELF_ARN = os.environ.get("SELF_ARN", "")
+METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "ReflectBench/Run")
 
 DEFAULT_POLL_INTERVAL_SEC = int(os.environ.get("DEFAULT_POLL_INTERVAL_SEC", "180"))
 BATCH_POLL_MAX_ATTEMPTS = int(os.environ.get("BATCH_POLL_MAX_ATTEMPTS", "20"))
@@ -95,6 +97,85 @@ def _log(level: str, payload: dict) -> None:
         logger.warning(message)
     else:
         logger.info(message)
+
+
+def _put_metric_data(run_id: str, metric_data: list[dict]) -> None:
+    dimensions = [{"Name": "RunId", "Value": run_id}]
+    payload: list[dict] = []
+    for item in metric_data:
+        payload.append(
+            {
+                "MetricName": item["MetricName"],
+                "Unit": item.get("Unit", "Count"),
+                "Value": float(item["Value"]),
+                "Dimensions": dimensions,
+            }
+        )
+    cloudwatch.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=payload)
+
+
+def _parse_iso_or_none(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _run_duration_sec(run_id: str) -> float:
+    item = _get_run_item(run_id)
+    started = _parse_iso_or_none(item.get("started_at", {}).get("S"))
+    if started is None:
+        started = _parse_iso_or_none(item.get("created_at", {}).get("S"))
+    finished = _parse_iso_or_none(item.get("finished_at", {}).get("S"))
+    if started is None:
+        return 0.0
+    if finished is None:
+        finished = _now()
+    delta = (finished - started).total_seconds()
+    return max(delta, 0.0)
+
+
+def _sum_shard_retries(run_id: str) -> int:
+    keys = [key for key in _s3_list(f"runs/{run_id}/batch-output/") if key.endswith("-job.json")]
+    retries = 0
+    for key in keys:
+        try:
+            payload = _s3_get_json(key)
+            attempts = int(payload.get("attempts", 1))
+        except Exception:  # noqa: BLE001
+            continue
+        retries += max(attempts - 1, 0)
+    return retries
+
+
+def _sum_parse_failures(state: dict) -> int:
+    return sum(int(value) for value in state.get("invalid_counts", {}).values())
+
+
+def _emit_finalize_metrics(run_id: str, final_state: str, state: dict) -> None:
+    metric_data = [
+        {"MetricName": "RunDurationSec", "Unit": "Seconds", "Value": _run_duration_sec(run_id)},
+        {"MetricName": "ParseFailureCount", "Unit": "Count", "Value": _sum_parse_failures(state)},
+        {"MetricName": "ShardRetryCount", "Unit": "Count", "Value": _sum_shard_retries(run_id)},
+    ]
+    if final_state == "SUCCEEDED":
+        metric_data.append({"MetricName": "RunSucceeded", "Unit": "Count", "Value": 1})
+    else:
+        metric_data.append({"MetricName": "RunFailed", "Unit": "Count", "Value": 1})
+
+    try:
+        _put_metric_data(run_id, metric_data)
+    except Exception as exc:  # noqa: BLE001
+        _log(
+            "warning",
+            {
+                "run_id": run_id,
+                "step": "METRICS",
+                "message": f"failed to publish metrics: {exc}",
+            },
+        )
 
 
 def _s3_put_json(key: str, payload: dict) -> None:
@@ -1254,8 +1335,10 @@ def handler(event, _context):
             invalid_total = sum(int(v) for v in state.get("invalid_counts", {}).values())
             if invalid_total > 0:
                 _finalize(run_id, "PARTIAL", retry_count, trace_id)
+                _emit_finalize_metrics(run_id, "PARTIAL", state)
                 return {"ok": True, "run_id": run_id, "state": "PARTIAL"}
             _finalize(run_id, "SUCCEEDED", retry_count, trace_id)
+            _emit_finalize_metrics(run_id, "SUCCEEDED", state)
             return {"ok": True, "run_id": run_id, "state": "SUCCEEDED"}
         return {"ok": True, "run_id": run_id, "deferred": True}
     except PipelineError as exc:
@@ -1275,6 +1358,7 @@ def handler(event, _context):
                 "category": exc.category,
             },
         )
+        _emit_finalize_metrics(run_id, "FAILED", state)
         _log(
             "error",
             {
@@ -1310,6 +1394,7 @@ def handler(event, _context):
                 "category": "internal",
             },
         )
+        _emit_finalize_metrics(run_id, "FAILED", state)
         _log(
             "error",
             {

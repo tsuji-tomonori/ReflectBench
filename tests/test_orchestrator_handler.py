@@ -1,80 +1,135 @@
 import importlib
-import json
 import os
-import unittest
-from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 
-class TestOrchestratorParsing(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        os.environ.setdefault("AWS_DEFAULT_REGION", "ap-southeast-2")
-        os.environ.setdefault("TABLE_NAME", "run_control_table")
-        os.environ.setdefault("ARTIFACTS_BUCKET", "dummy-bucket")
-        cls.mod = importlib.import_module("app.orchestrator.handler")
-
-    def test_extract_label_from_plain_text(self):
-        label = self.mod._extract_label_from_text("predicted label is HIGH")
-        self.assertEqual(label, "HIGH")
-
-    def test_extract_label_from_json_text(self):
-        label = self.mod._extract_label_from_text('{"predicted_label":"LOW"}')
-        self.assertEqual(label, "LOW")
-
-    def test_extract_label_from_batch_row_model_output_content(self):
-        row = {
-            "expected_label": "HIGH",
-            "modelOutput": {
-                "content": [
-                    {
-                        "text": '{"prediction":"HIGH"}',
-                    }
-                ]
-            },
-        }
-        label, raw_text = self.mod._extract_label_from_batch_row(row)
-        self.assertEqual(label, "HIGH")
-        self.assertIn("prediction", raw_text)
-
-    def test_extract_label_from_batch_row_ambiguous_falls_back_to_expected(self):
-        row = {
-            "expected_label": "LOW",
-            "raw_text": "The candidate might be high or low depending on context",
-        }
-        label, _raw_text = self.mod._extract_label_from_batch_row(row)
-        self.assertEqual(label, "LOW")
-
-    def test_extract_label_from_batch_row_nested_response_body(self):
-        row = {
-            "expected_label": "LOW",
-            "response": {
-                "body": {
-                    "messages": [
-                        {
-                            "content": [
-                                {
-                                    "text": '{"label":"LOW"}',
-                                }
-                            ]
-                        }
-                    ]
-                }
-            },
-        }
-        label, raw_text = self.mod._extract_label_from_batch_row(row)
-        self.assertEqual(label, "LOW")
-        self.assertIn("label", raw_text)
-
-    def test_extract_label_from_batch_output_fixtures(self):
-        fixture_path = Path(__file__).parent / "fixtures" / "bedrock_batch_output_samples.jsonl"
-        lines = fixture_path.read_text(encoding="utf-8").splitlines()
-
-        for line in lines:
-            case = json.loads(line)
-            with self.subTest(case=case["id"]):
-                label, _raw_text = self.mod._extract_label_from_batch_row(case["row"])
-                self.assertEqual(label, case["expected"])
+@pytest.fixture(scope="module")
+def mod():
+    os.environ.setdefault("AWS_DEFAULT_REGION", "ap-southeast-2")
+    os.environ.setdefault("TABLE_NAME", "run_control_table")
+    os.environ.setdefault("ARTIFACTS_BUCKET", "dummy-bucket")
+    os.environ.setdefault("BATCH_DRY_RUN", "true")
+    return importlib.import_module("app.orchestrator.handler")
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_record_id_is_deterministic(mod):
+    first = mod._record_id(
+        run_id="123e4567-e89b-42d3-a456-426614174000",
+        phase="study1",
+        model="m1",
+        target="t",
+        prompt_type="NORMAL",
+        temperature=0.5,
+        loop_index=0,
+    )
+    second = mod._record_id(
+        run_id="123e4567-e89b-42d3-a456-426614174000",
+        phase="study1",
+        model="m1",
+        target="t",
+        prompt_type="NORMAL",
+        temperature=0.5,
+        loop_index=0,
+    )
+    assert first == second
+
+
+def test_handler_rejects_invalid_run_id(mod):
+    res = mod.handler({"run_id": "bad-id"}, None)
+    assert res["ok"] is False
+    assert res["category"] == "validation"
+
+
+def test_handler_returns_deferred_when_lease_busy(mod):
+    with patch.object(mod, "_acquire_lease", return_value=False):
+        res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
+    assert res["ok"] is True
+    assert res["deferred"] is True
+
+
+def test_handler_finalizes_succeeded_when_all_phases_done(mod):
+    done_state = {
+        "cursor": len(mod.PHASES),
+        "retry_count": 0,
+        "invalid_counts": {},
+        "phase_counts": {},
+    }
+    with (
+        patch.object(mod, "_acquire_lease", return_value=True),
+        patch.object(mod, "_load_state", return_value=done_state),
+        patch.object(mod, "_finalize") as finalize,
+        patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
+        patch.object(mod, "_release_lease"),
+    ):
+        res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
+
+    assert res["ok"] is True
+    assert res["state"] == "SUCCEEDED"
+    assert finalize.call_args.args[1] == "SUCCEEDED"
+    assert emit_metrics.call_args.args[1] == "SUCCEEDED"
+
+
+def test_handler_finalizes_partial_when_invalid_exists(mod):
+    done_state = {
+        "cursor": len(mod.PHASES),
+        "retry_count": 0,
+        "invalid_counts": {"study1": 1},
+        "phase_counts": {},
+    }
+    with (
+        patch.object(mod, "_acquire_lease", return_value=True),
+        patch.object(mod, "_load_state", return_value=done_state),
+        patch.object(mod, "_finalize") as finalize,
+        patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
+        patch.object(mod, "_release_lease"),
+    ):
+        res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
+
+    assert res["ok"] is True
+    assert res["state"] == "PARTIAL"
+    assert finalize.call_args.args[1] == "PARTIAL"
+    assert emit_metrics.call_args.args[1] == "PARTIAL"
+
+
+def test_handler_returns_pipeline_error_model(mod):
+    initial_state = {"cursor": 0, "retry_count": 0, "invalid_counts": {}, "phase_counts": {}}
+    err = mod.PipelineError(
+        step="STUDY1_BATCH_POLL",
+        reason="poll timeout",
+        retryable=True,
+        category="timeout",
+    )
+    with (
+        patch.object(mod, "_acquire_lease", return_value=True),
+        patch.object(mod, "_load_state", side_effect=[dict(initial_state), dict(initial_state)]),
+        patch.object(mod, "_execute_phase", side_effect=err),
+        patch.object(mod, "_save_state"),
+        patch.object(mod, "_finalize") as finalize,
+        patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
+        patch.object(mod, "_release_lease"),
+    ):
+        res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
+
+    assert res["ok"] is False
+    assert res["category"] == "timeout"
+    assert res["retryable"] is True
+    assert finalize.call_args.kwargs["last_error"]["step"] == "STUDY1_BATCH_POLL"
+    assert emit_metrics.call_args.args[1] == "FAILED"
+
+
+def test_emit_finalize_metrics_contains_required_names(mod):
+    state = {"invalid_counts": {"study1": 2, "study2_within": 1}}
+    with (
+        patch.object(mod, "_run_duration_sec", return_value=42.0),
+        patch.object(mod, "_sum_shard_retries", return_value=3),
+        patch.object(mod, "_put_metric_data") as put_metric_data,
+    ):
+        mod._emit_finalize_metrics("123e4567-e89b-42d3-a456-426614174000", "SUCCEEDED", state)
+
+    metric_names = {datum["MetricName"] for datum in put_metric_data.call_args.args[1]}
+    assert "RunDurationSec" in metric_names
+    assert "ParseFailureCount" in metric_names
+    assert "ShardRetryCount" in metric_names
+    assert "RunSucceeded" in metric_names

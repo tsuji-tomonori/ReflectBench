@@ -15,7 +15,10 @@ def mod():
 
 def test_returns_404_for_unknown_run(mod):
     with patch.object(mod.dynamodb, "get_item", return_value={}):
-        res = mod.handler({"pathParameters": {"run_id": "missing"}}, None)
+        res = mod.handler(
+            {"pathParameters": {"run_id": "123e4567-e89b-42d3-a456-426614174000"}},
+            None,
+        )
     assert res["statusCode"] == 404
 
 
@@ -36,11 +39,14 @@ def test_returns_status_payload_from_dynamodb(mod):
         }
     }
     with patch.object(mod.dynamodb, "get_item", return_value=db_item):
-        res = mod.handler({"pathParameters": {"run_id": "run-1"}}, None)
+        res = mod.handler(
+            {"pathParameters": {"run_id": "123e4567-e89b-42d3-a456-426614174000"}},
+            None,
+        )
 
     body = json.loads(res["body"])
     assert res["statusCode"] == 200
-    assert body["run_id"] == "run-1"
+    assert body["run_id"] == "123e4567-e89b-42d3-a456-426614174000"
     assert body["state"] == "RUNNING"
     assert body["progress"]["percent"] == 20
 
@@ -48,7 +54,7 @@ def test_returns_status_payload_from_dynamodb(mod):
 def test_returns_retry_count_and_last_error(mod):
     db_item = {
         "Item": {
-            "run_id": {"S": "run-2"},
+            "run_id": {"S": "123e4567-e89b-42d3-a456-426614174001"},
             "phase": {"S": "REPORT"},
             "state": {"S": "FAILED"},
             "retry_count": {"N": "2"},
@@ -62,7 +68,10 @@ def test_returns_retry_count_and_last_error(mod):
         }
     }
     with patch.object(mod.dynamodb, "get_item", return_value=db_item):
-        res = mod.handler({"pathParameters": {"run_id": "run-2"}}, None)
+        res = mod.handler(
+            {"pathParameters": {"run_id": "123e4567-e89b-42d3-a456-426614174001"}},
+            None,
+        )
 
     body = json.loads(res["body"])
     assert res["statusCode"] == 200
@@ -71,4 +80,6 @@ def test_returns_retry_count_and_last_error(mod):
         "step": "STUDY1_BATCH_POLL",
         "reason": "[timeout] poll max attempts",
         "retryable": True,
+        "category": None,
+        "trace_id": None,
     }

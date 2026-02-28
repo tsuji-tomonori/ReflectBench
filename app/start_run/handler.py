@@ -18,18 +18,22 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 lambda_client = boto3.client("lambda")
+cloudwatch = boto3.client("cloudwatch")
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
 ORCHESTRATOR_ARN = os.environ["ORCHESTRATOR_ARN"]
 EDITOR_MODEL = "apac.amazon.nova-micro-v1:0"
+METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "ReflectBench/Run")
 
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
 
 
-def _request_hash(payload: RunCreateRequest) -> str:
+def _request_hash(payload: RunCreateRequest | dict) -> str:
+    if isinstance(payload, dict):
+        payload = RunCreateRequest.model_validate(payload)
     stable = {
         "loops": payload.loops,
         "full_cross": payload.full_cross,
@@ -61,6 +65,33 @@ def _accepted_body(run_id: str, accepted_at: str, phase: str, state: str) -> dic
         "initial_phase": phase,
         "state": state,
     }
+
+
+def _emit_run_started_metric(run_id: str, trace_id: str) -> None:
+    try:
+        cloudwatch.put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[
+                {
+                    "MetricName": "RunStarted",
+                    "Unit": "Count",
+                    "Value": 1.0,
+                    "Dimensions": [{"Name": "RunId", "Value": run_id}],
+                }
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            json.dumps(
+                {
+                    "trace_id": trace_id,
+                    "step": "POST_RUNS",
+                    "run_id": run_id,
+                    "message": f"failed to publish RunStarted metric: {exc}",
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 def handler(event, _context):
@@ -221,6 +252,7 @@ def handler(event, _context):
             InvocationType="Event",
             Payload=json.dumps({"run_id": run_id, "trace_id": trace_id}).encode("utf-8"),
         )
+        _emit_run_started_metric(run_id, trace_id)
     except ClientError as exc:
         if (
             exc.response.get("Error", {}).get("Code") == "TransactionCanceledException"

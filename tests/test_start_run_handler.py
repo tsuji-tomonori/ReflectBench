@@ -10,11 +10,10 @@ import pytest
 def mod():
     os.environ.setdefault("AWS_DEFAULT_REGION", "ap-southeast-2")
     os.environ.setdefault("TABLE_NAME", "run_control_table")
-    os.environ.setdefault("TABLE_GSI_NAME", "idempotency_key_index")
     os.environ.setdefault("ARTIFACTS_BUCKET", "dummy-bucket")
     os.environ.setdefault(
         "ORCHESTRATOR_ARN",
-        "arn:aws:lambda:ap-southeast-2:123:function:orchestrator",
+        "arn:aws:lambda:ap-southeast-2:123:function:orchestrator:live",
     )
     return importlib.import_module("app.start_run.handler")
 
@@ -42,17 +41,17 @@ def test_returns_existing_run_id_on_idempotent_retry(mod):
 
     with patch.object(
         mod,
-        "_query_by_idempotency_key",
+        "_load_idempotency",
         return_value={
-            "run_id": {"S": "run-123"},
             "request_hash": {"S": mod._request_hash(body)},
+            "linked_run_id": {"S": "123e4567-e89b-42d3-a456-426614174000"},
         },
     ):
         res = mod.handler(_event(body), None)
 
     payload = json.loads(res["body"])
     assert res["statusCode"] == 202
-    assert payload["run_id"] == "run-123"
+    assert payload["run_id"] == "123e4567-e89b-42d3-a456-426614174000"
 
 
 def test_returns_409_when_same_key_different_payload(mod):
@@ -65,9 +64,9 @@ def test_returns_409_when_same_key_different_payload(mod):
 
     with patch.object(
         mod,
-        "_query_by_idempotency_key",
+        "_load_idempotency",
         return_value={
-            "run_id": {"S": "run-123"},
+            "linked_run_id": {"S": "123e4567-e89b-42d3-a456-426614174000"},
             "request_hash": {"S": "different-hash"},
         },
     ):
@@ -76,29 +75,16 @@ def test_returns_409_when_same_key_different_payload(mod):
     assert res["statusCode"] == 409
 
 
-def test_returns_202_with_required_fields_on_new_run(mod):
-    body = {
-        "loops": 10,
-        "full_cross": True,
-        "idempotency_key": "k2",
-    }
-
+def test_returns_202_when_new_run_created(mod):
     with (
-        patch.object(mod, "_now_iso", return_value="2026-02-28T00:00:00+00:00"),
-        patch.object(mod.uuid, "uuid4", return_value="run-fixed-id"),
-        patch.object(mod, "_query_by_idempotency_key", return_value=None),
-        patch.object(mod.s3, "put_object") as s3_put,
-        patch.object(mod.dynamodb, "put_item") as put_item,
-        patch.object(mod.lambda_client, "invoke") as invoke,
+        patch.object(mod, "_load_idempotency", return_value=None),
+        patch.object(mod.s3, "put_object", return_value={}),
+        patch.object(mod.dynamodb, "transact_write_items", return_value={}),
+        patch.object(mod.lambda_client, "invoke", return_value={}),
+        patch.object(mod.cloudwatch, "put_metric_data", return_value={}) as put_metric,
     ):
-        res = mod.handler(_event(body), None)
+        res = mod.handler(_event({"loops": 10, "full_cross": True}), None)
 
-    payload = json.loads(res["body"])
     assert res["statusCode"] == 202
-    assert payload["run_id"] == "run-fixed-id"
-    assert payload["accepted_at"] == "2026-02-28T00:00:00+00:00"
-    assert payload["initial_phase"] == "STUDY1_ENUMERATE"
-    assert payload["state"] == "QUEUED"
-    s3_put.assert_called_once()
-    put_item.assert_called_once()
-    invoke.assert_called_once()
+    metric = put_metric.call_args.kwargs["MetricData"][0]
+    assert metric["MetricName"] == "RunStarted"

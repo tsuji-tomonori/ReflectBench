@@ -29,6 +29,13 @@ def _list_keys(prefix: str) -> list[str]:
     return sorted(keys)
 
 
+def _run_exists(run_id: str) -> bool:
+    res = s3.list_objects_v2(
+        Bucket=ARTIFACTS_BUCKET, Prefix=f"runs/{run_id}/config.json", MaxKeys=1
+    )
+    return bool(res.get("Contents"))
+
+
 def handler(event, _context):
     trace_id = trace_id_from_event(event)
     step = "GET_RUN_ARTIFACTS"
@@ -46,6 +53,17 @@ def handler(event, _context):
         )
 
     logger.info(json.dumps({"trace_id": trace_id, "step": step, "run_id": run_id}))
+    if not _run_exists(run_id):
+        return problem_response(
+            status_code=404,
+            code="RUN_NOT_FOUND",
+            message="run_id not found",
+            category="validation",
+            retryable=False,
+            step=step,
+            trace_id=trace_id,
+        )
+
     base = f"runs/{run_id}/"
     body = {
         "run_id": run_id,
