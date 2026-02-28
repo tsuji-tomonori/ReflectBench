@@ -20,8 +20,11 @@ This directory contains the AWS CDK implementation for the `/runs` control API.
 
 ```bash
 uv sync --group infra
-uv run --group infra cdk synth
+uv run --group infra --no-binary cdk synth
 
 # enable SNS-backed alarms
-uv run --group infra cdk synth -c enable_notifications=true
+uv run --group infra --no-binary cdk synth -c enable_notifications=true
 ```
+
+`aws-cdk-lib` transitive packages occasionally publish wheels that fail uv metadata validation.
+Using `--no-binary` makes uv build from sdist and avoids this issue reliably.
