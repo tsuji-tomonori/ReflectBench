@@ -3,7 +3,7 @@ id: DD-INF-DEP-002
 title: デプロイ詳細（実行パラメータと運用制約）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.1
+version: 1.0.2
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -52,6 +52,12 @@ tags:
 - API応答構造の正本は [[DD-INF-API-001]] とする。
 - [[RQ-GL-005|manifest]]/[[RQ-GL-012|canonical schema]]/成果物キー契約の正本は [[DD-INF-DATA-001]] とする。
 - 監視指標・アラームは [[DD-INF-MON-001]]、最小権限は [[DD-INF-IAM-001]]、配備チェーンは [[DD-INF-PIPE-001]] を参照する。
+- 実験条件・閾値・分析物の詳細は DD-APP 群（[[DD-APP-OVR-001]], [[DD-APP-MOD-001]], [[DD-APP-DATA-001]]）を正本とする。
+
+## 状態管理方針
+- `RunStatus` と `idempotency_key` は DynamoDB（`run_control_table`）で管理する。
+- 成果物本文は S3 を正本とし、DynamoDB にはキー参照（`artifacts_index`）のみ保持する。
+- 状態更新は「S3 書き込み成功後に DynamoDB 更新」を基本順序とする。
 
 ## モデルルーティング
 - `NOVA_MICRO` -> `apac.amazon.nova-micro-v1:0`
@@ -97,6 +103,7 @@ tags:
 - 集計 CSV と source [[RQ-GL-002|run]] の関連が `record_id` で逆引きできる。
 
 ## 変更履歴
+- 2026-02-28: 実験詳細の正本参照先を DD-APP 群へ追加 [[RQ-RDR-002]]
 - 2026-02-28: API/データ/IAM/監視/CI_CDの正本分離を追記 [[BD-SYS-ADR-001]]
 - 2026-02-28: 制約（単一環境/非常時運用/非冗長）を運用パラメータへ反映 [[BD-SYS-ADR-001]]
 - 2026-02-28: 初版作成（plan.md の推奨初期値・retry方針・監視観点を定義） [[BD-SYS-ADR-001]]

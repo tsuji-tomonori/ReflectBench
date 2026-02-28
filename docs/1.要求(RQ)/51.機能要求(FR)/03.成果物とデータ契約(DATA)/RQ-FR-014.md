@@ -3,7 +3,7 @@ id: RQ-FR-014
 title: レポートCSVとrun manifestを出力できる
 doc_type: 機能要求
 phase: RQ
-version: 1.0.1
+version: 1.0.2
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -27,11 +27,14 @@ tags:
 - 種別: 機能要求
 - 優先度: MUST
 - 要求: `study1_summary.csv`, `study2_within.csv`, `study2_across.csv`, `experiment_a.csv`, `experiment_d.csv`, `run_manifest.json` を出力できる。
+- 要求（実験詳細プロファイル）: `.ai_workspace/llm-temp-introspection` 準拠の `output/study2/summary.csv`、`output/analysis/*.csv`、`output/figures/*` を追加成果物として扱える。
 - 根拠: 比較分析と監査記録を両立するため。
 - 受入基準: [[RQ-GL-002|run]] 完了時に6成果物が S3 に存在する。
+- 受入基準（実験詳細プロファイル）: `experiment_a_p_high_delta.csv`, `experiment_d_accuracy_by_label_condition.csv`, `experiment_d_wrong_label_shift.csv` が生成される。
 - 例外/エラー: 失敗 [[RQ-GL-002|run]] では欠損理由を [[RQ-GL-002|run]]_[[RQ-GL-005|manifest]] に記録する。
 - 依存・関連: [[RQ-UC-004]], [[RQ-UC-005]]
 
 ## 変更履歴
+- 2026-02-28: 実験詳細プロファイル向け分析成果物を追記 [[RQ-RDR-002]]
 - 2026-02-28: 成果物契約の DD-INF/DD-APP 追跡リンクを追加 [[RQ-RDR-002]]
 - 2026-02-28: 初版作成 [[RQ-RDR-002]]

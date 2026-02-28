@@ -3,7 +3,7 @@ id: DD-INF-DEP-001
 title: デプロイ詳細（Durable Orchestration）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.1
+version: 1.0.2
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -40,11 +40,14 @@ tags:
 - durable 実行は `orchestrator_fn`（alias ARN）を起点にし、ワークフロー全体の長時間待機を Lambda Durable Functions で処理する。
 - `start_run_fn` は `run_id` 発行と `config.json` 保存までを担当し、重い処理は実行しない。
 - すべての推論は Bedrock Batch Inference で実行し、同期 invoke を行わない。
+- 制御プレーンは DynamoDB を正本とし、`RunStatus` と `idempotency_key` を管理する。
+- データプレーンは S3 を正本とし、`manifest` / `batch-output` / `normalized` / `invalid` / `reports` を保存する。
 
 ## 正本参照
 - API入出力契約の正本は [[DD-INF-API-001]] とする。
 - [[RQ-GL-012|canonical schema]] と成果物契約の正本は [[DD-INF-DATA-001]] とする。
 - IAM最小権限は [[DD-INF-IAM-001]]、監視・通知は [[DD-INF-MON-001]]、CI/CD実装は [[DD-INF-PIPE-001]] を参照する。
+- 実験アルゴリズム詳細（self/within/across, A/D 条件、分析成果物）は [[DD-APP-OVR-001]] / [[DD-APP-MOD-001]] を正本とする。
 
 ## API 仕様（最小）
 | メソッド | パス | 役割 |
@@ -57,8 +60,9 @@ tags:
 1. 入力検証（`loops=10`, `full_cross=true`, editor 固定など）。
 2. `run_id` を生成。
 3. `runs/{run_id}/config.json` を S3 保存。
-4. `orchestrator_fn` の alias ARN を指定して durable 実行開始。
-5. `202 Accepted` と `run_id` を返却。
+4. DynamoDB に `RunStatus(state=QUEUED)` と `idempotency_key` を条件付き保存。
+5. `orchestrator_fn` の alias ARN を指定して durable 実行開始。
+6. `202 Accepted` と `run_id` を返却。
 
 ## durable step 定義
 1. Study1 列挙
@@ -95,12 +99,18 @@ tags:
 - `reports/experiment_d.csv`
 - `reports/run_manifest.json`
 
+## 状態参照と成果物DL
+- `GET /runs/{run_id}` は DynamoDB の `RunStatus` を返す。
+- `GET /runs/{run_id}/artifacts` は S3 キー一覧（必要に応じて署名URL）を返す。
+- 実データのダウンロード元は S3 とし、DynamoDB は成果物ポインタの保持に限定する。
+
 ## 障害ハンドリング
 - Bedrock job failure: [[RQ-GL-004|shard]] 単位で 1 回再試行。
 - JSON parse failure: `invalid/` へ退避し、後続集計から除外。
 - step failure: `RunStatus` に失敗 step / reason / retry 可否を記録。
 
 ## 変更履歴
+- 2026-02-28: 実験詳細正本を DD-APP 側へ明示（infra/experiment 分担） [[RQ-RDR-002]]
 - 2026-02-28: API/データ/IAM/監視/CI_CDの正本分離を追記 [[BD-SYS-ADR-001]]
 - 2026-02-28: FR/GL への要求トレーサビリティリンクを追加 [[BD-SYS-ADR-001]]
 - 2026-02-28: 初版作成（plan.md の 0-9 step と POC 出力構成をDDへ落とし込み） [[BD-SYS-ADR-001]]

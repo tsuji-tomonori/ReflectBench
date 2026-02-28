@@ -3,7 +3,7 @@ id: index
 title: ホーム
 doc_type: ホーム
 phase: RQ
-version: 1.0.0
+version: 1.0.2
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -71,7 +71,14 @@ tags:
 13. [[DD-APP-DATA-001]]（アプリデータ契約）
 14. [[OPSREL-RUN-001]]（運用ランブック）
 
+## 注記
+- `docs/2.基本設計(BD)/03.アプリ(APP)` 配下は旧文脈の参考文書を含む。現行スコープの正本は RQ-SC/DD-INF/DD-APP を優先する。
+- 正本分担: インフラ/全体像は `plan.md`、実験詳細は `.ai_workspace/llm-temp-introspection` を参照する。
+
 ## 変更履歴
+- 2026-02-28: 正本分担（plan /.ai_workspace）を注記へ追加 [[RQ-RDR-002]]
+- 2026-02-28: 現行スコープに合わせて入口からBD-APP導線を外し、旧文脈は注記へ集約 [[RQ-RDR-002]]
+- 2026-02-28: APP基本設計（BD-APP-API/DATA/UI/QUAL）への導線を追加 [[BD-SYS-ADR-001]]
 - 2026-02-28: DD-APP文書群への導線を追加 [[RQ-RDR-002]]
 - 2026-02-28: プロジェクト制約（RQ-PC-001）への導線を追加 [[RQ-RDR-002]]
 - 2026-02-28: SC/SH/GL/UC/FR/NFR 文書群への導線を追加 [[RQ-RDR-002]]

@@ -3,7 +3,7 @@ id: DD-APP-MOD-001
 title: 実験実行モジュール仕様
 doc_type: モジュール仕様
 phase: DD
-version: 1.0.0
+version: 1.0.1
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -31,6 +31,7 @@ tags:
 ## 詳細仕様
 - モジュールは `run_api`, `orchestration`, `batch_adapter`, `normalizer`, `report_builder` に分割する。
 - 各モジュールは pure logic を優先し、AWS 依存は adapter 境界に隔離する。
+- 実験アルゴリズムの具体ロジックは `.ai_workspace/llm-temp-introspection/src/study/s2.py`, `experiment_a.py`, `experiment_d.py` を参照実装とする。
 
 ## モジュール責務
 | モジュール | 主な責務 | 入力 | 出力 |
@@ -49,10 +50,17 @@ tags:
 5. `orchestration` が Study2 within/across、実験A、実験D を順次進行する。
 6. `report_builder` が成果物を確定し、`RunStatus` を `SUCCEEDED/FAILED` へ遷移する。
 
+## 実験詳細ルール（.ai_workspace 準拠）
+- Study2 は `self_reflection`（自己判定再利用）, `within_model`, `across_model` の3条件を区別する。
+- `across_model` は generator と異なる predictor のみを対象にする。
+- 実験Aは `PromptType.NORMAL` サンプルのみを edit 対象にし、`info_plus` / `info_minus` を予測する。
+- 実験D `wrong_label` は `FACTUAL <-> CRAZY` swap のみを対象とし、`NORMAL` は除外する。
+
 ## 受入条件
 - モジュール単位で単体テスト可能な責務分離になっている。
 - retry 時に `orchestration` が同一 `record_id` で再処理できる。
 
 ## 変更履歴
+- 2026-02-28: 実験詳細ルール（self条件、A/D対象条件）を追記 [[RQ-RDR-002]]
 - 2026-02-28: 総論のアプリ処理フローに合わせて処理順序を具体化（idempotency/retry/終状態遷移を明確化） [[DD-APP-OVR-001]]
 - 2026-02-28: 初版作成（[[RQ-GL-002|run]]実行ロジックのモジュール分割を定義） [[BD-SYS-ADR-001]]

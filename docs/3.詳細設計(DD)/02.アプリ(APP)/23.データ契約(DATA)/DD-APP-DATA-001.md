@@ -3,7 +3,7 @@ id: DD-APP-DATA-001
 title: アプリデータモデル詳細
 doc_type: データ契約
 phase: DD
-version: 1.0.0
+version: 1.0.1
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -26,6 +26,7 @@ tags:
 ## 詳細仕様
 - [[RQ-GL-012|canonical schema]] は [[DD-INF-DATA-001]] を正本とし、本書はアプリ側クラス定義と変換責務を定義する。
 - strict JSON の decode 後に Pydantic モデルへ変換し、型不一致は例外化して `invalid/` へ送る。
+- 状態管理（`RunStatus`/`idempotency`）は DynamoDB、成果物本文は S3 を正本とする。
 
 ## アプリモデル
 | モデル | 用途 | 主なフィールド |
@@ -40,14 +41,22 @@ tags:
 - `RunStatus` -> `RunStatusView` 変換で `datetime` は ISO8601(UTC) へ統一する。
 - `PredictionRecord` の `predicted_label` は語彙正規化後に保存する。
 - `record_id` は生成関数を単一化し、呼び出し側で直接生成しない。
+- `condition_type` は `self_reflection`, `within_model`, `across_model`, `blind`, `wrong_label`, `info_plus`, `info_minus` を受理する。
 
 ## I/O責務
 - 入力: batch output JSON、[[RQ-GL-002|run]]設定JSON、status中間データ。
 - 出力: normalized JSONL、invalid JSONL、report 用 CSV レコード。
+
+## 実験詳細プロファイルの追加成果物
+- `output/study2/summary.csv`
+- `output/analysis/experiment_a_p_high_delta.csv`
+- `output/analysis/experiment_d_accuracy_by_label_condition.csv`
+- `output/analysis/experiment_d_wrong_label_shift.csv`
 
 ## 受入条件
 - Pydantic モデルで schema 不整合を検出できる。
 - 同一条件では常に同一 `record_id` を生成する。
 
 ## 変更履歴
+- 2026-02-28: condition_type 列挙値と分析成果物CSVを追記 [[RQ-RDR-002]]
 - 2026-02-28: 初版作成（アプリ側データモデルと変換責務を定義） [[BD-SYS-ADR-001]]

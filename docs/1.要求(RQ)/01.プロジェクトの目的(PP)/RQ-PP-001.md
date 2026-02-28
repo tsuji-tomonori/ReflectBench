@@ -3,7 +3,7 @@ id: RQ-PP-001
 title: llm-temp-introspection の目的
 doc_type: プロジェクトの目的
 phase: RQ
-version: 1.0.1
+version: 1.0.2
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -55,7 +55,13 @@ tags:
 - 環境は1環境のみで、常時開放は前提としない。
 - 利用者は[[RQ-SH-001|管理者]]のみとし、冗長化は採用しない。
 
+## 正本分担ルール
+- インフラ/全体構成の正本は `plan.md` とし、BD/INF/DD-INF 文書群へ反映する。
+- 実験条件/閾値/分析手順の正本は `.ai_workspace/llm-temp-introspection` とし、RQ-FR/DD-APP 文書群へ反映する。
+- 両者が競合する場合は「基盤運用プロファイル（plan）」と「実験詳細プロファイル（.ai_workspace）」を分離して記述する。
+
 ## 変更履歴
+- 2026-02-28: 正本分担ルール（infra=plan, experiment=.ai_workspace）を追加 [[RQ-RDR-002]]
 - 2026-02-28: DD-INF/DD-APP への逆リンクを追加 [[RQ-RDR-002]]
 - 2026-02-28: プロジェクト制約（単一環境/管理者単独/非冗長）を前提へ追記 [[RQ-RDR-002]]
 - 2026-02-28: SC/FR/NFR への関連リンクを追加 [[RQ-RDR-002]]
