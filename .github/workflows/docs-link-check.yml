@@ -31,10 +31,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Install Python dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "PyYAML>=6,<7"
+        run: uv sync --frozen --group docs
 
       - name: Validate glossary links and document ID links
         env:

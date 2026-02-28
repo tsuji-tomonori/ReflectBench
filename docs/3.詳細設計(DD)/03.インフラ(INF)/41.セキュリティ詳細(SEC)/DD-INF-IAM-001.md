@@ -22,7 +22,7 @@ tags:
 
 ## 詳細仕様
 - Lambda実行ロールと Bedrock Batch サービスロールを分離し、最小権限で運用する。
-- 許可対象は S3（[[RQ-GL-002|run]] prefix 限定）/ Bedrock Batch API / CloudWatch（logs, metrics）に限定する。
+- 許可対象は S3（[[RQ-GL-002|run]] prefix 限定）/ DynamoDB（run制御テーブル）/ Bedrock Batch API / CloudWatch（logs, metrics）に限定する。
 
 ## ロール定義
 | ロール | 主体 | 主な責務 |
@@ -35,17 +35,20 @@ tags:
 ## 許可アクション（必須）
 ### `start_run_fn_role`
 - `s3:PutObject` on `runs/*/config.json`
+- `dynamodb:PutItem`, `dynamodb:ConditionCheckItem`, `dynamodb:Query` on `run_control_table` and `idempotency_key` GSI
 - `lambda:InvokeFunction` on `orchestrator_fn` alias ARN
 - `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`
 
 ### `orchestrator_fn_role`
 - `bedrock:CreateModelInvocationJob`, `bedrock:GetModelInvocationJob`
 - `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on `runs/{run_id}/*`
+- `dynamodb:GetItem`, `dynamodb:UpdateItem`, `dynamodb:Query` on `run_control_table`
 - `cloudwatch:PutMetricData`（namespace 固定）
 - `logs:*`（作成/書き込み系のみ）
 
 ### `status_fn_role`
 - `s3:GetObject`, `s3:ListBucket` on `runs/{run_id}/*`
+- `dynamodb:GetItem` on `run_control_table`
 - `logs:FilterLogEvents`（必要最小範囲）
 
 ### `bedrock_batch_service_role`

@@ -35,3 +35,14 @@ def test_returns_grouped_artifact_keys(mod):
     assert len(body["reports"]) == 1
     assert len(body["normalized"]) == 1
     assert len(body["invalid"]) == 0
+
+
+def test_returns_empty_arrays_when_artifacts_not_generated(mod):
+    with patch.object(mod, "_list_keys", side_effect=[[], [], []]):
+        res = mod.handler({"pathParameters": {"run_id": "run-empty"}}, None)
+
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 200
+    assert body["reports"] == []
+    assert body["normalized"] == []
+    assert body["invalid"] == []

@@ -74,3 +74,31 @@ def test_returns_409_when_same_key_different_payload(mod):
         res = mod.handler(_event(body), None)
 
     assert res["statusCode"] == 409
+
+
+def test_returns_202_with_required_fields_on_new_run(mod):
+    body = {
+        "loops": 10,
+        "full_cross": True,
+        "idempotency_key": "k2",
+    }
+
+    with (
+        patch.object(mod, "_now_iso", return_value="2026-02-28T00:00:00+00:00"),
+        patch.object(mod.uuid, "uuid4", return_value="run-fixed-id"),
+        patch.object(mod, "_query_by_idempotency_key", return_value=None),
+        patch.object(mod.s3, "put_object") as s3_put,
+        patch.object(mod.dynamodb, "put_item") as put_item,
+        patch.object(mod.lambda_client, "invoke") as invoke,
+    ):
+        res = mod.handler(_event(body), None)
+
+    payload = json.loads(res["body"])
+    assert res["statusCode"] == 202
+    assert payload["run_id"] == "run-fixed-id"
+    assert payload["accepted_at"] == "2026-02-28T00:00:00+00:00"
+    assert payload["initial_phase"] == "STUDY1_ENUMERATE"
+    assert payload["state"] == "QUEUED"
+    s3_put.assert_called_once()
+    put_item.assert_called_once()
+    invoke.assert_called_once()

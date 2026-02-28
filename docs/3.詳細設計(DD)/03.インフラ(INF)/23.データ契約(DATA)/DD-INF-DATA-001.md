@@ -30,6 +30,11 @@ tags:
 - モデル出力は strict JSON のみ受理し、Pydantic 検証成功分のみ `normalized/` へ保存する。
 - 検証失敗は `invalid/` に退避し、[[RQ-GL-002|run]] 集計は除外継続する。
 
+## データ原本境界
+- `RunStatus` と `idempotency_key` の正本は DynamoDB（`run_control_table`）とする。
+- 実験の成果物本文（JSONL/CSV/manifest/batch-output）は S3 を正本とする。
+- `GET /runs/{run_id}` は DynamoDB を参照し、`GET /runs/{run_id}/artifacts` は S3 キー契約を返す。
+
 ## [[RQ-GL-012|canonical schema]]
 ### `RunConfig`
 | フィールド | 型 | 必須 | 説明 |
@@ -54,6 +59,20 @@ tags:
 | `last_error` | object\|null | No | `step`,`reason`,`retryable` |
 | `started_at` | string(datetime)\|null | No | 実行開始 |
 | `finished_at` | string(datetime)\|null | No | 実行完了 |
+
+### `RunControl`（DynamoDB保存）
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `run_id` | string | Yes | PK |
+| `idempotency_key` | string | No | GSI参照キー（同値再送判定） |
+| `request_hash` | string | Yes | 条件差分検知用ハッシュ |
+| `phase` | string | Yes | 現在フェーズ |
+| `state` | string | Yes | `QUEUED/RUNNING/SUCCEEDED/FAILED/PARTIAL` |
+| `progress` | object | Yes | `completed_steps`,`total_steps`,`percent` |
+| `retry_count` | integer | Yes | 累積 retry 回数 |
+| `last_error` | object\|null | No | `step`,`reason`,`retryable` |
+| `artifacts_index` | object\|null | No | reports/normalized/invalid の代表キー |
+| `updated_at` | string(datetime) | Yes | 最終更新時刻 |
 
 ### `Study1Record`
 | フィールド | 型 | 必須 |

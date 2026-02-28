@@ -50,6 +50,7 @@ tags:
 
 ## 必須設計項目（BDで必ず決める）
 - 実行基盤: API Gateway + Lambda + S3 + Bedrock Batch + CloudWatch（任意で SNS）。
+- 状態管理: `RunStatus` と `idempotency` は DynamoDB を正本とし、成果物本体は S3 を正本とする。
 - 長時間制御: `orchestrator_fn` を Lambda Durable Functions 前提で作成する。
 - モデル固定: `apac.amazon.nova-micro-v1:0`, `google.gemma-3-12b-it`, `mistral.ministral-3-8b-instruct`, `qwen.qwen3-32b-v1:0`。
 - フェーズ境界: Study1 -> Study2(within/across) -> 実験A(edit/predict) -> 実験D([[RQ-GL-010|blind]]/[[RQ-GL-011|wrong-label]]) -> report。
@@ -82,6 +83,7 @@ Client (Admin only)
 | Lambda | `orchestrator_fn` | フェーズ列挙、Batch 投入、待機、正規化、集計 |
 | Lambda | `status_fn` | 実行状態/成果物の参照 API |
 | API Gateway | HTTP API | `/runs` 系エンドポイント提供 |
+| DynamoDB | `run_control_table` | `RunStatus`/`idempotency` の正本 |
 | IAM | Lambda実行ロール / Bedrockサービスロール | 最小権限で S3/Bedrock を制御 |
 | CloudWatch | Logs / Alarms | 失敗検知、実行監視 |
 | SNS (任意) | 通知トピック | 完了/失敗通知 |

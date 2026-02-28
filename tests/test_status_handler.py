@@ -43,3 +43,32 @@ def test_returns_status_payload_from_dynamodb(mod):
     assert body["run_id"] == "run-1"
     assert body["state"] == "RUNNING"
     assert body["progress"]["percent"] == 20
+
+
+def test_returns_retry_count_and_last_error(mod):
+    db_item = {
+        "Item": {
+            "run_id": {"S": "run-2"},
+            "phase": {"S": "REPORT"},
+            "state": {"S": "FAILED"},
+            "retry_count": {"N": "2"},
+            "last_error": {
+                "M": {
+                    "step": {"S": "STUDY1_BATCH_POLL"},
+                    "reason": {"S": "[timeout] poll max attempts"},
+                    "retryable": {"BOOL": True},
+                }
+            },
+        }
+    }
+    with patch.object(mod.dynamodb, "get_item", return_value=db_item):
+        res = mod.handler({"pathParameters": {"run_id": "run-2"}}, None)
+
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 200
+    assert body["retry_count"] == 2
+    assert body["last_error"] == {
+        "step": "STUDY1_BATCH_POLL",
+        "reason": "[timeout] poll max attempts",
+        "retryable": True,
+    }

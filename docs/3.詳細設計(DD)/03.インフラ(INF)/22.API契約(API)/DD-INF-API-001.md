@@ -27,6 +27,7 @@ tags:
 ## 詳細仕様
 - 対象APIは `POST /runs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts` の3本とする。
 - 外部契約キーは `snake_case` を正本とし、内部実装の命名差は変換層で吸収する。
+- `GET /runs/{run_id}` の正本データは DynamoDB、成果物本体の正本は S3 とする。
 
 ## エンドポイント一覧
 | メソッド | パス | 役割 | 正常応答 |
@@ -75,6 +76,9 @@ tags:
 | `reports` | string[] | CSV/[[RQ-GL-005|manifest]]キー一覧 |
 | `normalized` | string[] | 正規化データキー一覧 |
 | `invalid` | string[] | 検証失敗データキー一覧 |
+
+- 返却されるキーは S3 上の成果物を指し、実データDLは S3（または署名URL）経由とする。
+- DynamoDB は `RunStatus` と成果物ポインタ管理に限定し、CSV/JSONL本文は保持しない。
 
 ## エラー契約
 - `400 Bad Request`: 入力不正（必須不足、制約違反）

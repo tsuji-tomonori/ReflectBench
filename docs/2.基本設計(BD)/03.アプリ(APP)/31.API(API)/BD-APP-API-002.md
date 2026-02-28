@@ -16,17 +16,10 @@ up:
 - '旧参照'
 related:
 - '旧参照'
-- '旧参照'
-- '旧参照'
-- '旧参照'
 - '[[BD-APP-API-005]]'
-- '旧参照'
-- '旧参照'
 - '旧参照'
 - '[[BD-APP-DATA-001]]'
 - '[[DD-APP-API-001]]'
-- '旧参照'
-- '旧参照'
 - '旧参照'
 tags:
 - llm-temp-introspection
@@ -37,6 +30,7 @@ tags:
 ## スコープ注記
 - 本文書は `docs/2.基本設計(BD)/03.アプリ(APP)` の旧文脈文書を保持する参考文書であり、現行スコープの正本ではない。
 - 現行スコープの正本は `[[RQ-SC-001]]` と DD-INF/DD-APP 系列を優先する。
+- 本文中の「旧参照」は、現行リポジトリに存在しない旧要求/旧設計IDを示す。
 
 
 
@@ -61,7 +55,7 @@ tags:
 | タグ提案入力契約 | LLM貼り付け用の提案入力を生成 | 旧参照 |
 | タグ提案取込契約 | LLM出力JSONを検証してDB反映 | 旧参照, [[RQ-FR-005]] |
 | タグ更新契約 | タグ辞書の追加/更新/無効化 | [[RQ-FR-005]], [[RQ-FR-009]] |
-| 配信反映契約 | DB正本から配信JSON再生成を起動 | 旧参照, 旧参照 |
+| 配信反映契約 | DB正本から配信JSON再生成を起動 | 旧参照 |
 
 ## バッチ仕様正本
 - バッチ一覧、バッチイベント一覧、バッチ実行制約、補助データ生成バッチ入出力契約、同時実行制御の正本は本書とする。
@@ -70,24 +64,24 @@ tags:
 ## バッチ一覧
 | バッチID | バッチ名 | 起動契約 | 主な責務 | 状態遷移 | 詳細設計 |
 |---|---|---|---|---|---|
-| BAT-001 | 収集[[RQ-GL-002|run]]バッチ | `POST /api/v1/ops/ingestion/runs` | 収集対象解決、[[RQ-GL-002|収集実行]]、[[RQ-GL-002|run]]採番/集計 | `queued -> running -> succeeded\|failed\|partial\|cancelled` | 旧参照, 旧参照, 旧参照 |
-| BAT-002 | 再収集[[RQ-GL-002|run]]バッチ | `POST /api/v1/ops/ingestion/runs/{run_id}/retry` | 失敗[[RQ-GL-002|run]]再実行、親[[RQ-GL-002|run]]連結、再実行回数制御 | `queued -> running -> succeeded\|failed\|partial\|cancelled` | 旧参照, 旧参照, 旧参照 |
-| BAT-003 | 配信前後再確認実行バッチ | `POST /api/v1/ops/rechecks` | 配信前後メタデータ差分判定、差分集計記録 | `queued -> running -> succeeded\|failed\|partial\|cancelled` | 旧参照, 旧参照 |
-| BAT-004 | 配信反映バッチ | `POST /api/v1/admin/publish/tag-master` | DB正本から成果物再生成、公開切替、失敗時ロールバック | `queued -> running -> succeeded\|failed\|rolled_back\|cancelled` | 旧参照, 旧参照 |
-| BAT-005 | docs公開バッチ | `POST /api/v1/admin/docs/publish` | docsビルド、配信反映、無効化処理 | `queued -> running -> succeeded\|failed\|rolled_back` | 旧参照, 旧参照 |
-| BAT-006 | 補助データ生成バッチ | 収集[[RQ-GL-002|run]]完了トリガ（内部） | コメント密度波形・ワードクラウド生成 | `queued -> running -> succeeded\|failed\|partial` | 旧参照, 旧参照, 旧参照 |
-| BAT-007 | タグマスター即時更新バッチ | `POST /api/v1/admin/publish/tag-master`（publishScope=タグマスター） | タグ辞書変更後の即時公開反映 | `queued -> running -> succeeded\|failed\|rolled_back` | 旧参照, 旧参照 |
+| BAT-001 | 収集[[RQ-GL-002|run]]バッチ | `POST /api/v1/ops/ingestion/runs` | 収集対象解決、[[RQ-GL-002|収集実行]]、[[RQ-GL-002|run]]採番/集計 | `queued -> running -> succeeded\|failed\|partial\|cancelled` | 旧参照 |
+| BAT-002 | 再収集[[RQ-GL-002|run]]バッチ | `POST /api/v1/ops/ingestion/runs/{run_id}/retry` | 失敗[[RQ-GL-002|run]]再実行、親[[RQ-GL-002|run]]連結、再実行回数制御 | `queued -> running -> succeeded\|failed\|partial\|cancelled` | 旧参照 |
+| BAT-003 | 配信前後再確認実行バッチ | `POST /api/v1/ops/rechecks` | 配信前後メタデータ差分判定、差分集計記録 | `queued -> running -> succeeded\|failed\|partial\|cancelled` | 旧参照 |
+| BAT-004 | 配信反映バッチ | `POST /api/v1/admin/publish/tag-master` | DB正本から成果物再生成、公開切替、失敗時ロールバック | `queued -> running -> succeeded\|failed\|rolled_back\|cancelled` | 旧参照 |
+| BAT-005 | docs公開バッチ | `POST /api/v1/admin/docs/publish` | docsビルド、配信反映、無効化処理 | `queued -> running -> succeeded\|failed\|rolled_back` | 旧参照 |
+| BAT-006 | 補助データ生成バッチ | 収集[[RQ-GL-002|run]]完了トリガ（内部） | コメント密度波形・ワードクラウド生成 | `queued -> running -> succeeded\|failed\|partial` | 旧参照 |
+| BAT-007 | タグマスター即時更新バッチ | `POST /api/v1/admin/publish/tag-master`（publishScope=タグマスター） | タグ辞書変更後の即時公開反映 | `queued -> running -> succeeded\|failed\|rolled_back` | 旧参照 |
 
 ## バッチイベント一覧
 | イベントID | イベント名 | 発火条件 | 対象バッチ | 記録先 | 詳細設計 |
 |---|---|---|---|---|---|
-| BEV-001 | `queued` | API受理直後に[[RQ-GL-002|run]]作成 | BAT-001〜BAT-005 | `ingestion_runs` / `recheck_runs` / `publish_runs` の `status=queued` | 旧参照, 旧参照, 旧参照 |
-| BEV-002 | `running` | 同一Backend API内ジョブ実行モジュールで処理開始 | BAT-001〜BAT-005 | [[RQ-GL-002|run]]テーブル `status=running`、`started_at` | 旧参照, 旧参照, 旧参照, 旧参照 |
-| BEV-003 | `succeeded` | 全ステップ成功で正常終了 | BAT-001〜BAT-005 | [[RQ-GL-002|run]]テーブル終端状態、成功件数/公開時刻 | 旧参照, 旧参照, 旧参照, 旧参照 |
-| BEV-004 | `failed` | 非復旧エラーで終了 | BAT-001〜BAT-005 | `error_code`/`error_message`、監査ログ | 旧参照, 旧参照, 旧参照, 旧参照 |
-| BEV-005 | `partial` | 一部対象のみ成功して終了 | BAT-001〜BAT-003 | 件数差分（`success_count`/`failed_count`/`unchanged_count`） | 旧参照, 旧参照, 旧参照, 旧参照 |
-| BEV-006 | `rolled_back` | 公開切替失敗後に旧版へ切戻し完了 | BAT-004〜BAT-005 | `publish_runs.rollback_executed=true` | 旧参照, 旧参照, 旧参照 |
-| BEV-007 | `cancelled` | 運用判断または安全停止で中断 | BAT-001〜BAT-004 | [[RQ-GL-002|run]]テーブル終端状態 `cancelled` | 旧参照, 旧参照, 旧参照, 旧参照 |
+| BEV-001 | `queued` | API受理直後に[[RQ-GL-002|run]]作成 | BAT-001〜BAT-005 | `ingestion_runs` / `recheck_runs` / `publish_runs` の `status=queued` | 旧参照 |
+| BEV-002 | `running` | 同一Backend API内ジョブ実行モジュールで処理開始 | BAT-001〜BAT-005 | [[RQ-GL-002|run]]テーブル `status=running`、`started_at` | 旧参照 |
+| BEV-003 | `succeeded` | 全ステップ成功で正常終了 | BAT-001〜BAT-005 | [[RQ-GL-002|run]]テーブル終端状態、成功件数/公開時刻 | 旧参照 |
+| BEV-004 | `failed` | 非復旧エラーで終了 | BAT-001〜BAT-005 | `error_code`/`error_message`、監査ログ | 旧参照 |
+| BEV-005 | `partial` | 一部対象のみ成功して終了 | BAT-001〜BAT-003 | 件数差分（`success_count`/`failed_count`/`unchanged_count`） | 旧参照 |
+| BEV-006 | `rolled_back` | 公開切替失敗後に旧版へ切戻し完了 | BAT-004〜BAT-005 | `publish_runs.rollback_executed=true` | 旧参照 |
+| BEV-007 | `cancelled` | 運用判断または安全停止で中断 | BAT-001〜BAT-004 | [[RQ-GL-002|run]]テーブル終端状態 `cancelled` | 旧参照 |
 
 ## バッチ実行制約
 | バッチID | 最大実行時間 | Retry回数 | Retry間隔 | 同時実行数 | 備考 |

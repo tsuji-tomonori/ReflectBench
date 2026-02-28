@@ -45,4 +45,4 @@
 - target:
   - path params (`run_id` vs `runId`)
   - run state (`QUEUED/RUNNING/...` vs `queued/running/...`)
-- done: partial (BD-APP-API-001/002 と BD-APP-UI-002 で `run_id`/`video_id` へ統一。状態語彙の全層統一は未完)
+- done: partial (BD-APP-API-001/002 と BD-APP-UI-002/007/009/010/011 で `run_id`/`video_id` へ統一。状態語彙の全層統一は未完)

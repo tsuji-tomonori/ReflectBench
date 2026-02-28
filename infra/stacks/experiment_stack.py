@@ -18,6 +18,7 @@ class ExperimentStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         repo_root = Path(__file__).resolve().parents[2]
+        app_root = repo_root / "app"
         enable_notifications = bool(self.node.try_get_context("enable_notifications"))
 
         artifacts_bucket = s3.Bucket(
@@ -62,27 +63,34 @@ class ExperimentStack(Stack):
             "OrchestratorFn",
             function_name="orchestrator_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="handler.handler",
-            code=lambda_.Code.from_asset(str(repo_root / "app" / "orchestrator")),
+            handler="orchestrator.handler.handler",
+            code=lambda_.Code.from_asset(str(app_root)),
             timeout=Duration.minutes(15),
             environment={
                 "TABLE_NAME": run_control_table.table_name,
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
                 "BEDROCK_BATCH_ROLE_ARN": bedrock_batch_service_role.role_arn,
                 "BATCH_DRY_RUN": "false",
+                "MAX_PHASES_PER_INVOCATION": "1",
+                "LEASE_SECONDS": "300",
+                "SELF_ARN": "orchestrator_fn",
                 "ENABLE_NOTIFICATIONS": "true" if enable_notifications else "false",
             },
         )
+        orchestrator_fn.add_environment("SELF_ARN", orchestrator_fn.function_arn)
         orchestrator_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:CreateModelInvocationJob", "bedrock:GetModelInvocationJob"],
-                resources=["*"],
+                resources=[
+                    f"arn:aws:bedrock:{self.region}::foundation-model/*",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:model-invocation-job/*",
+                ],
             )
         )
         orchestrator_fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["cloudwatch:PutMetricData"],
-                resources=["*"],
+                actions=["lambda:InvokeFunction"],
+                resources=[orchestrator_fn.function_arn],
             )
         )
 
@@ -98,8 +106,8 @@ class ExperimentStack(Stack):
             "StartRunFn",
             function_name="start_run_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="handler.handler",
-            code=lambda_.Code.from_asset(str(repo_root / "app" / "start_run")),
+            handler="start_run.handler.handler",
+            code=lambda_.Code.from_asset(str(app_root)),
             timeout=Duration.seconds(30),
             environment={
                 "TABLE_NAME": run_control_table.table_name,
@@ -114,8 +122,8 @@ class ExperimentStack(Stack):
             "StatusFn",
             function_name="status_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="handler.handler",
-            code=lambda_.Code.from_asset(str(repo_root / "app" / "status")),
+            handler="status.handler.handler",
+            code=lambda_.Code.from_asset(str(app_root)),
             timeout=Duration.seconds(30),
             environment={
                 "TABLE_NAME": run_control_table.table_name,
@@ -127,8 +135,8 @@ class ExperimentStack(Stack):
             "ArtifactsFn",
             function_name="artifacts_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="handler.handler",
-            code=lambda_.Code.from_asset(str(repo_root / "app" / "artifacts")),
+            handler="artifacts.handler.handler",
+            code=lambda_.Code.from_asset(str(app_root)),
             timeout=Duration.seconds(30),
             environment={
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,

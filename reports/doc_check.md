@@ -1,6 +1,6 @@
 # doc_check
 
-- checked_files: 95
+- checked_files: 123
 - issues: 0
 
 ## result
