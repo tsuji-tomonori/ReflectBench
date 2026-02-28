@@ -3,7 +3,7 @@ id: DD-INF-DEP-002
 title: デプロイ詳細（実行パラメータと運用制約）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.2
+version: 1.0.3
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -25,6 +25,8 @@ related:
   - '[[DD-APP-DATA-001]]'
   - '[[DD-APP-ERR-001]]'
   - '[[RQ-PC-001]]'
+  - '[[RQ-COST-001-01]]'
+  - '[[RQ-COST-001-02]]'
   - '[[BD-SYS-ADR-001]]'
   - '[[OPSREL-RUN-001]]'
 tags:
@@ -47,6 +49,39 @@ tags:
 - 単一環境のみで運用し、環境分割を行わない。
 - 常時開放は行わず、必要時のみ起動して実験を実施する。
 - 冗長化構成は採用せず、障害時は再試行と再実行で復旧する。
+
+## コスト見積もり（`plan.md` ベース）
+
+### 1 run あたりのモデル費（Bedrock Batch, `ap-southeast-2`）
+| モデル | Bedrock model ID | Batch単価（Input / Output, per 1M tokens） | 推定 Input | 推定 Output | 推定費用/ run |
+|---|---|---:|---:|---:|---:|
+| Nova Micro | `apac.amazon.nova-micro-v1:0` | $0.0175 / $0.0700 | 3.87M | 3.40M | $0.31 |
+| Gemma 3 12B IT | `google.gemma-3-12b-it` | $0.04635 / $0.14935 | 3.51M | 3.07M | $0.62 |
+| Ministral 3 8B | `mistral.ministral-3-8b-instruct` | $0.07725 / $0.07725 | 3.51M | 3.07M | $0.51 |
+| Qwen3 32B | `qwen.qwen3-32b-v1:0` | $0.0773 / $0.3090 | 3.51M | 3.07M | $1.22 |
+
+- 合計: **$2.66 / run**（`plan.md` の試算値を採用）
+- 比較: 同条件オンデマンド概算 **$5.31 / run**
+- 誤差前提: prompt/response 長の proxy 試算のため、請求実績は概ね **±20-30%** を許容する。
+
+### phase 別モデル費（1 run 概算）
+| phase | 概算費用 |
+|---|---:|
+| Study1 | $0.26 |
+| Study2 within | $0.14 |
+| Study2 across | $0.42 |
+| 追加実験A: edit | $0.03 |
+| 追加実験A: predict | $0.56 |
+| 追加実験D: blind | $0.70 |
+| 追加実験D: wrong-label | $0.56 |
+
+- 支配要因は Qwen3 32B の output 単価であり、追加実験Dで費用寄与が最大になる。
+- 受入基準 `[[RQ-COST-001-01]]` に対し、現行試算は **$2.66 / run < $3.50 / run** を満たす。
+
+### サーバレス基盤費（アイドル時の考え方）
+- 時間課金の常時起動リソース（EC2/RDS/NAT Gateway/EKS node）は採用しない。
+- 従量課金対象は API Gateway / Lambda / S3 / CloudWatch Logs / DynamoDB（PAY_PER_REQUEST）とする。
+- この規模ではモデル費が支配的であり、基盤費は副次的とする（詳細は `[[RQ-COST-001-01]]` の週次試算で監視）。
 
 ## 正本参照
 - API応答構造の正本は [[DD-INF-API-001]] とする。
@@ -103,6 +138,7 @@ tags:
 - 集計 CSV と source [[RQ-GL-002|run]] の関連が `record_id` で逆引きできる。
 
 ## 変更履歴
+- 2026-02-28: `plan.md` ベースのモデル費見積もりと phase 別費用を追加し、RQ-COST トレースを追記 [[RQ-RDR-002]]
 - 2026-02-28: 実験詳細の正本参照先を DD-APP 群へ追加 [[RQ-RDR-002]]
 - 2026-02-28: API/データ/IAM/監視/CI_CDの正本分離を追記 [[BD-SYS-ADR-001]]
 - 2026-02-28: 制約（単一環境/非常時運用/非冗長）を運用パラメータへ反映 [[BD-SYS-ADR-001]]
