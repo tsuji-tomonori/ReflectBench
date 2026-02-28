@@ -1,0 +1,78 @@
+name: Docs Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute_deploy:
+        description: "Execute deploy chain (docs:deploy:ci)"
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**/*.md"
+      - "Taskfile.yaml"
+      - ".github/workflows/docs-deploy.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: docs-deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  docs-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      DOCS_SITE_URL: ${{ vars.DOCS_SITE_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Task
+        uses: go-task/setup-task@v1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "PyYAML>=6,<7"
+
+      - name: Run docs guard (default)
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.execute_deploy != 'true'
+        run: task docs:guard
+
+      - name: Validate required variables
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
+        run: |
+          test -n "${{ vars.AWS_ROLE_ARN }}" || { echo "Missing variable: AWS_ROLE_ARN"; exit 1; }
+          test -n "${AWS_REGION}" || { echo "Missing variable: AWS_REGION"; exit 1; }
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify assumed identity
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
+        run: aws sts get-caller-identity
+
+      - name: Deploy docs (manual opt-in)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_deploy == 'true'
+        run: task docs:deploy:ci

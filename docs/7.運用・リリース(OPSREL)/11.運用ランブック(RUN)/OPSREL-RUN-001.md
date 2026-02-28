@@ -3,7 +3,7 @@ id: OPSREL-RUN-001
 title: Bedrock Batch 実験運用ランブック
 doc_type: 運用ランブック
 phase: AT
-version: 1.0.0
+version: 1.0.1
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -18,6 +18,7 @@ related:
   - '[[RQ-OBS-001-02]]'
   - '[[BD-INF-DEP-001]]'
   - '[[BD-INF-DEP-002]]'
+  - '[[DD-INF-PIPE-001]]'
   - '[[BD-SYS-ADR-001]]'
 tags:
   - llm-temp-introspection
@@ -66,7 +67,15 @@ tags:
 - 連続実行時は週次で `run_manifest.json` を集計し、[[RQ-GL-003|phase]] 別コスト比率を確認する。
 - Qwen3 32B の output 単価が支配的なため、追加実験 D の件数増加を最優先監視対象にする。
 
+## ドキュメント配信手順（CI/CD骨格）
+1. GitHub の `prod` environment に `AWS_ROLE_ARN`, `AWS_REGION`, `DOCS_SITE_URL` を設定する。
+2. `.github/workflows/docs-deploy.yml` を `workflow_dispatch` で起動し、`execute_deploy=true` を指定する。
+3. 実行ログで `aws sts get-caller-identity` が成功し、`task docs:deploy:ci` が完了することを確認する。
+4. `execute_deploy=false` または `push(main)` では `task docs:guard` のみが実行されることを確認する。
+5. `infra/` 未実装時は `infra:deploy:ci` が skeleton 動作（skip）となるため、infra 実装後に本番デプロイ処理へ置換する。
+
 ## 変更履歴
+- 2026-02-28: docs-deploy の配信手順（environment 変数/手動 deploy 条件）を追記 [[BD-SYS-ADR-001]]
 - 2026-02-28: 非常時運用（常時開放しない）制約を反映 [[BD-SYS-ADR-001]]
 - 2026-02-28: UC/NFR（可観測性）への追跡リンクを追加 [[BD-SYS-ADR-001]]
 - 2026-02-28: 初版作成（plan.md の運用初期値と障害対応を Runbook 化） [[BD-SYS-ADR-001]]

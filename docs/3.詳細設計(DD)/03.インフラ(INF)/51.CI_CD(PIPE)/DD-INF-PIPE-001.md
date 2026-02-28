@@ -3,7 +3,7 @@ id: DD-INF-PIPE-001
 title: CI/CD実装詳細（docs + deploy）
 doc_type: CI/CD詳細
 phase: DD
-version: 1.0.0
+version: 1.0.1
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -22,13 +22,14 @@ tags:
 
 ## 詳細仕様
 - 実行入口は `workflow_dispatch` と `push(main)` の2系統を採用する。
+- `push(main)` は `docs:guard` のみ実行し、`workflow_dispatch` で `execute_deploy=true` の場合のみ配備チェーンを実行する。
 - 配備チェーンは `docs:guard -> infra:deploy -> docs:verify` を固定し、品質ゲート未通過時は配備しない。
 
 ## workflow 実装
 | 項目 | 設定 |
 |---|---|
 | Workflow名 | `docs-deploy` |
-| Trigger | `workflow_dispatch`, `push` on `main` |
+| Trigger | `workflow_dispatch`（`execute_deploy` 入力あり）, `push` on `main` |
 | Path filter | `docs/**`, `Taskfile.yaml`, `.github/workflows/docs-deploy.yml` |
 | Environment | `prod` |
 | Concurrency | `docs-deploy-prod`（直列化） |
@@ -37,10 +38,11 @@ tags:
 ## ジョブ手順
 1. `actions/checkout`
 2. `go-task/setup-task`
-3. Python / Node セットアップ
-4. OIDC で AWS ロール Assume
-5. `aws sts get-caller-identity` で配備先アカウント確認
-6. `task docs:deploy:ci` 実行
+3. Python セットアップ
+4. `push(main)` または `execute_deploy=false` の場合は `task docs:guard` のみ実行
+5. `execute_deploy=true` の場合は OIDC で AWS ロール Assume
+6. `aws sts get-caller-identity` で配備先アカウント確認
+7. `task docs:deploy:ci` 実行
 
 ## task 実装契約
 - `docs:deploy:ci` は `docs:guard -> infra:deploy -> docs:verify` を順守する。
@@ -64,4 +66,5 @@ tags:
 - 配備後に `docs:verify` が実行され、失敗時は原因切り分けが可能である。
 
 ## 変更履歴
+- 2026-02-28: docs-deploy を手動条件付き配備へ更新（`execute_deploy`） [[BD-SYS-ADR-001]]
 - 2026-02-28: 初版作成（docs + deploy チェーンのCI/CD実装詳細を定義） [[BD-SYS-ADR-001]]

@@ -1,0 +1,44 @@
+name: Docs Link Check
+
+on:
+  pull_request:
+    paths:
+      - "docs/**/*.md"
+      - ".opencode/skills/obsidian-doc-check/scripts/validate_vault.py"
+      - ".opencode/skills/obsidian-doc-new/scripts/auto_link_glossary.py"
+      - ".github/workflows/docs-link-check.yml"
+  push:
+    paths:
+      - "docs/**/*.md"
+      - ".opencode/skills/obsidian-doc-check/scripts/validate_vault.py"
+      - ".opencode/skills/obsidian-doc-new/scripts/auto_link_glossary.py"
+      - ".github/workflows/docs-link-check.yml"
+
+jobs:
+  docs-link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Task
+        uses: go-task/setup-task@v1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "PyYAML>=6,<7"
+
+      - name: Validate glossary links and document ID links
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: task docs:guard
