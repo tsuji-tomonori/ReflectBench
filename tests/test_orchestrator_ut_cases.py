@@ -70,7 +70,7 @@ def test_prediction_phase_writes_invalid_rows(mod):
 
     assert out_rows == []
     assert len(invalid_rows) == 1
-    assert invalid_rows[0]["reason"].startswith("schema validation failed")
+    assert invalid_rows[0]["reason"] == "recordId not found in manifest"
     put_jsonl.assert_called_once()
     write_invalid.assert_called_once()
 
@@ -78,11 +78,23 @@ def test_prediction_phase_writes_invalid_rows(mod):
 def test_submit_batch_jobs_retries_once_per_shard(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174002"
     manifest_key = f"runs/{run_id}/manifests/study1/model-a/part-00001.jsonl"
+    manifest_row = {
+        "record_id": "r-1",
+        "run_id": run_id,
+        "phase": "study1",
+        "model_id": "model-a",
+        "temperature": 0.3,
+        "prompt_type": "FACTUAL",
+        "target": "x",
+        "loop_index": 0,
+    }
 
     with (
         patch.object(mod, "BATCH_DRY_RUN", False),
         patch.object(mod, "BEDROCK_BATCH_ROLE_ARN", "arn:aws:iam::123:role/bedrock-batch"),
         patch.object(mod, "_s3_list", return_value=[manifest_key]),
+        patch.object(mod, "_s3_get_jsonl", return_value=[manifest_row]),
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
         patch.object(mod, "_model_id_from_manifest_key", return_value="model-a"),
         patch.object(mod.bedrock, "create_model_invocation_job") as submit_job,
         patch.object(mod, "_s3_put_json") as put_json,
@@ -92,9 +104,79 @@ def test_submit_batch_jobs_retries_once_per_shard(mod):
 
     assert jobs[manifest_key] == "job-arn-1"
     assert submit_job.call_count == 2
+    put_jsonl.assert_called_once()
     metadata_payload = put_json.call_args.args[1]
     assert metadata_payload["attempts"] == 2
     assert metadata_payload["status"] == "SUBMITTED"
+
+
+def test_build_batch_input_rows_contains_messages(mod):
+    rows = [
+        {
+            "record_id": "r-1",
+            "run_id": "123e4567-e89b-42d3-a456-426614174000",
+            "phase": "study1",
+            "model_id": "model-a",
+            "temperature": 0.0,
+            "prompt_type": "FACTUAL",
+            "target": "x",
+            "loop_index": 0,
+        }
+    ]
+
+    out = mod._build_batch_input_rows("study1", rows)
+
+    assert len(out) == 1
+    assert out[0]["recordId"] == "r-1"
+    assert out[0]["modelInput"]["messages"][0]["role"] == "user"
+    assert out[0]["modelInput"]["messages"][0]["content"][0]["text"]
+
+
+def test_normalize_study1_parses_batch_wrapper(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174099"
+    manifest_key = f"runs/{run_id}/manifests/study1/model-a/part-00001.jsonl"
+    output_key = f"runs/{run_id}/batch-output/study1/model-a/part-00001.jsonl"
+    record_id = "rec-1"
+    manifest_row = {
+        "record_id": record_id,
+        "run_id": run_id,
+        "phase": "study1",
+        "model_id": "model-a",
+        "temperature": 0.9,
+        "prompt_type": "FACTUAL",
+        "target": "x",
+        "loop_index": 0,
+    }
+    wrapped_output = {
+        "recordId": record_id,
+        "modelOutput": {
+            "output": {
+                "message": {
+                    "content": [
+                        {"text": '{"generated_sentence":"s","reasoning":"r","judgment":"HIGH"}'}
+                    ]
+                }
+            }
+        },
+    }
+
+    with (
+        patch.object(mod, "_s3_list") as s3_list,
+        patch.object(mod, "_s3_get_jsonl") as s3_get_jsonl,
+        patch.object(mod, "_s3_put_jsonl") as s3_put_jsonl,
+        patch.object(mod, "_write_invalid_rows") as write_invalid,
+    ):
+        s3_list.side_effect = [[manifest_key], [output_key]]
+        s3_get_jsonl.side_effect = [[manifest_row], [wrapped_output]]
+
+        rows, invalid_rows = mod._normalize_study1(run_id)
+
+    assert len(rows) == 1
+    assert rows[0]["record_id"] == record_id
+    assert rows[0]["judgment"] == "HIGH"
+    assert invalid_rows == []
+    s3_put_jsonl.assert_called_once()
+    write_invalid.assert_called_once_with(run_id, "study1", [])
 
 
 def test_poll_batch_jobs_returns_false_when_job_still_running(mod):

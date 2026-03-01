@@ -69,11 +69,15 @@ tags:
    - 4モデル x 11温度 x 3 prompt x 5 target x 10 loops = 6,600 records を列挙する。
 2. Batch submit
    - [[RQ-GL-004|shard]] 単位で `CreateModelInvocationJob` を実行する。
+   - `manifests/{phase}/...jsonl`（内部列挙形式）を `batch-input/{phase}/...jsonl`（Bedrock入力形式）へ変換してから投入する。
+   - Bedrock入力は `recordId` と `modelInput.messages` を必須とし、`messages` 欠落行は submit 前に検出する。
 3. Job poll
    - 1 invocation あたり 1 回だけ `GetModelInvocationJob` を実行し、未完了なら `cursor` を維持して defer する（ブロッキング待機しない）。
    - 次回チェックは `orchestrator_fn` の自己再起動で継続し、完了時のみ次 phase に遷移する。
 4. 正規化
-   - Batch output を strict JSON として検証し、Pydantic で [[RQ-GL-012|canonical schema]] 化する。
+   - Batch output の wrapper（`recordId`/`modelOutput`/`error`）を解釈し、`recordId` で manifest 行に再結合する。
+   - `modelOutput` 本文を strict JSON として検証し、Pydantic で [[RQ-GL-012|canonical schema]] 化する。
+   - `error` 行は `invalid/` へ退避して集計対象から除外する。
 5. Study2 候補生成
    - Study2: `low<=0.2`, `high>=0.8`。
    - 実験A/D: `low<=0.5`, `high>=0.8`。
@@ -145,6 +149,7 @@ stateDiagram-v2
 - step failure: `RunStatus` に失敗 step / reason / retry 可否を記録。
 
 ## 変更履歴
+- 2026-03-02: Batch submit 前に `manifests -> batch-input` 変換を追加し、`messages` 必須契約と `recordId` 再結合正規化を明記 [[RQ-FR-006]]
 - 2026-03-01: state/phase の遷移図を追記し、defer 時の `RUNNING` 維持を明記 [[RQ-FR-007]]
 - 2026-03-01: Job poll を non-blocking 化（sleep廃止、1回確認して defer 継続） [[RQ-FR-007]]
 - 2026-02-28: 実験詳細正本を DD-APP 側へ明示（infra/experiment 分担） [[RQ-RDR-002]]

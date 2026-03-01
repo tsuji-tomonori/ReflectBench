@@ -100,6 +100,20 @@ tags:
 | `predicted_label` | string | Yes |
 | `raw_text` | string | Yes |
 
+### `BatchInputRow`（Bedrock投入形式）
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `recordId` | string | Yes | manifest 行と再結合するための安定ID |
+| `modelInput.messages` | array | Yes | Converse 入力。最低1件の user message を持つ |
+| `modelInput.inferenceConfig.temperature` | number | No | Study1 は列挙温度、予測系は `0.0` |
+
+### `BatchOutputRow`（Bedrock出力形式）
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `recordId` | string | Yes | `BatchInputRow.recordId` を引き継ぐ |
+| `modelOutput` | object | Cond | 成功時に存在。本文JSONを内包する wrapper |
+| `error` | object/string | Cond | 失敗時に存在。`errorMessage` を invalid 理由に記録 |
+
 ## deterministic ID
 - `record_id = sha256(run_id + phase + model + target + prompt_type + temp + loop_index)` とする。
 - 再試行・再実行でも同一条件なら同一 `record_id` を生成する。
@@ -107,6 +121,7 @@ tags:
 ## S3 格納契約
 - `runs/{run_id}/config.json`
 - `runs/{run_id}/manifests/{phase}/{model}/part-xxxxx.jsonl`
+- `runs/{run_id}/batch-input/{phase}/{model}/part-xxxxx.jsonl`
 - `runs/{run_id}/batch-output/{phase}/{model}/...`
 - `runs/{run_id}/normalized/{phase}/...jsonl`
 - `runs/{run_id}/invalid/{phase}/{model}/...jsonl`
@@ -128,9 +143,12 @@ tags:
 | `estimated_model_cost_usd` | number | 推定モデル費 |
 
 ## 受入条件
+- `batch-input/` 行は `recordId` と `modelInput.messages` を必須とし、欠落行は submit 前に検出される。
 - strict JSON + Pydantic 検証の成功/失敗で `normalized/` と `invalid/` が分離される。
+- `batch-output/` は `recordId` で manifest と再結合して正規化される。
 - `run_manifest.json` から [[RQ-GL-003|phase]]別件数、retry、invalid を追跡できる。
 - 同一条件再実行で `record_id` が一致する。
 
 ## 変更履歴
+- 2026-03-02: `batch-input` 契約、`modelInput.messages` 必須、`recordId` 再結合の正規化契約を追記 [[RQ-FR-006]]
 - 2026-02-28: 初版作成（[[RQ-GL-012|canonical schema]] と成果物契約を定義） [[BD-SYS-ADR-001]]

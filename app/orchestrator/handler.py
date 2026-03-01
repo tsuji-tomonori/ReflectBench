@@ -454,6 +454,87 @@ def _output_key_for_manifest(manifest_key: str, phase: str) -> str:
     return manifest_key.replace(f"/manifests/{phase}/", f"/batch-output/{phase}/")
 
 
+def _batch_input_key_for_manifest(manifest_key: str, phase: str) -> str:
+    return manifest_key.replace(f"/manifests/{phase}/", f"/batch-input/{phase}/")
+
+
+def _request_row_id(phase: str, row: dict) -> str:
+    if phase == "study1":
+        return str(row["record_id"])
+    seed = "|".join(
+        [
+            phase,
+            str(row.get("source_record_id", "")),
+            str(row.get("generator_model", "")),
+            str(row.get("predictor_model", "")),
+            str(row.get("condition_type", "")),
+        ]
+    )
+    return _sha256(seed)
+
+
+def _build_study1_prompt(row: dict) -> str:
+    return (
+        "You are a strict JSON generator. "
+        "Return exactly one JSON object with keys "
+        '"generated_sentence" (string), "reasoning" (string), "judgment" ("HIGH" or "LOW"). '
+        "Do not include markdown or extra text.\n"
+        "Context:\n"
+        f"- target: {row['target']}\n"
+        f"- prompt_type: {row['prompt_type']}\n"
+        f"- temperature: {float(row['temperature']):.1f}\n"
+        "Generate one sentence and classify it."
+    )
+
+
+def _build_prediction_prompt(row: dict) -> str:
+    return (
+        "You are a strict JSON generator. "
+        "Return exactly one JSON object with key "
+        '"predicted_label" ("HIGH" or "LOW"). '
+        "Do not include markdown or extra text.\n"
+        "Context:\n"
+        f"- condition_type: {row.get('condition_type')}\n"
+        f"- generator_model: {row.get('generator_model')}\n"
+        f"- predictor_model: {row.get('predictor_model')}\n"
+        f"- source_record_id: {row.get('source_record_id')}\n"
+        "Decide the label."
+    )
+
+
+def _build_batch_input_rows(phase: str, rows: list[dict]) -> list[dict]:
+    out_rows: list[dict] = []
+    for row in rows:
+        if phase == "study1":
+            prompt = _build_study1_prompt(row)
+            temp = float(row["temperature"])
+        else:
+            prompt = _build_prediction_prompt(row)
+            temp = 0.0
+
+        out_rows.append(
+            {
+                "recordId": _request_row_id(phase, row),
+                "modelInput": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "text": prompt,
+                                }
+                            ],
+                        }
+                    ],
+                    "inferenceConfig": {
+                        "temperature": temp,
+                    },
+                },
+            }
+        )
+    return out_rows
+
+
 def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
     manifest_keys = [
         key for key in _s3_list(f"runs/{run_id}/manifests/{phase}/") if key.endswith(".jsonl")
@@ -462,7 +543,11 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
     for key in manifest_keys:
         metadata_key = _metadata_key_for_manifest(key, phase)
         output_key = _output_key_for_manifest(key, phase)
+        input_key = _batch_input_key_for_manifest(key, phase)
         model_id = _model_id_from_manifest_key(key, phase)
+        manifest_rows = _s3_get_jsonl(key)
+        batch_input_rows = _build_batch_input_rows(phase, manifest_rows)
+        _s3_put_jsonl(input_key, batch_input_rows)
 
         if BATCH_DRY_RUN:
             job_identifier = f"dryrun-{_sha256(key)[:24]}"
@@ -473,6 +558,7 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
                     "job_identifier": job_identifier,
                     "status": "COMPLETED",
                     "manifest_key": key,
+                    "input_key": input_key,
                     "output_key": output_key,
                     "submitted_at": _now_iso(),
                     "completed_at": _now_iso(),
@@ -503,7 +589,7 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
                     jobName=job_name,
                     roleArn=BEDROCK_BATCH_ROLE_ARN,
                     modelId=model_id,
-                    inputDataConfig={"s3InputDataConfig": {"s3Uri": _to_s3_uri(key)}},
+                    inputDataConfig={"s3InputDataConfig": {"s3Uri": _to_s3_uri(input_key)}},
                     outputDataConfig={"s3OutputDataConfig": {"s3Uri": _to_s3_uri(output_prefix)}},
                 )
                 job_identifier = str(
@@ -516,6 +602,7 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
                         "job_identifier": job_identifier,
                         "status": "SUBMITTED",
                         "manifest_key": key,
+                        "input_key": input_key,
                         "output_key": output_key,
                         "model_id": model_id,
                         "submitted_at": _now_iso(),
@@ -649,6 +736,98 @@ def _materialize_dryrun_batch_output_for_phase(run_id: str, phase: str) -> None:
         _s3_put_jsonl(_output_key_for_manifest(manifest_key, phase), out_rows)
 
 
+def _load_manifest_index(run_id: str, phase: str) -> dict[str, dict]:
+    manifest_keys = [
+        key for key in _s3_list(f"runs/{run_id}/manifests/{phase}/") if key.endswith(".jsonl")
+    ]
+    indexed: dict[str, dict] = {}
+    for manifest_key in manifest_keys:
+        rows = _s3_get_jsonl(manifest_key)
+        for row in rows:
+            indexed[_request_row_id(phase, row)] = row
+    return indexed
+
+
+def _extract_text_from_model_output(payload: object) -> str | None:
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        return _extract_text_from_model_output(parsed)
+
+    if not isinstance(payload, dict):
+        return None
+
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    for key in ("content", "message", "output", "modelOutput", "response", "body"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                extracted = _extract_text_from_model_output(item)
+                if extracted:
+                    return extracted
+        else:
+            extracted = _extract_text_from_model_output(value)
+            if extracted:
+                return extracted
+
+    return None
+
+
+def _json_object_from_text(text: str) -> dict | None:
+    candidate = text.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(candidate[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_batch_payload(row: dict) -> tuple[dict | None, str | None]:
+    if "modelOutput" not in row:
+        return None, "modelOutput is missing"
+
+    text = _extract_text_from_model_output(row.get("modelOutput"))
+    if not text:
+        return None, "modelOutput text is missing"
+
+    payload = _json_object_from_text(text)
+    if payload is None:
+        return None, "modelOutput text is not a JSON object"
+    return payload, None
+
+
+def _row_error_message(row: dict) -> str | None:
+    err = row.get("error")
+    if isinstance(err, dict):
+        msg = err.get("errorMessage")
+        if isinstance(msg, str) and msg:
+            return msg
+    if isinstance(err, str) and err:
+        return err
+    return None
+
+
 def _write_invalid_rows(run_id: str, phase: str, rows: list[dict]) -> None:
     if not rows:
         return
@@ -665,6 +844,7 @@ def _write_invalid_rows(run_id: str, phase: str, rows: list[dict]) -> None:
 def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
     normalized: list[dict] = []
     invalid_rows: list[dict] = []
+    manifest_index = _load_manifest_index(run_id, "study1")
     output_keys = [
         key
         for key in _s3_list(f"runs/{run_id}/batch-output/study1/")
@@ -675,17 +855,99 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
         rows = _s3_get_jsonl(key)
         out_rows: list[dict] = []
         for row in rows:
+            if _row_error_message(row):
+                record_id = str(
+                    row.get("recordId")
+                    or row.get("record_id")
+                    or row.get("modelInput", {}).get("record_id")
+                    or "unknown"
+                )
+                base = manifest_index.get(record_id, {})
+                invalid_rows.append(
+                    {
+                        "run_id": run_id,
+                        "phase": "study1",
+                        "record_id": record_id,
+                        "model": str(base.get("model_id", row.get("model_id", "unknown"))),
+                        "reason": _row_error_message(row),
+                        "raw_text": json.dumps(row, ensure_ascii=False),
+                    }
+                )
+                continue
+
+            rec_obj: dict
+            if {
+                "record_id",
+                "run_id",
+                "phase",
+                "model_id",
+                "temperature",
+                "prompt_type",
+                "target",
+                "loop_index",
+                "generated_sentence",
+                "reasoning",
+                "judgment",
+            }.issubset(row):
+                rec_obj = dict(row)
+            else:
+                record_id = str(row.get("recordId") or row.get("record_id") or "")
+                base = manifest_index.get(record_id)
+                if not base:
+                    invalid_rows.append(
+                        {
+                            "run_id": run_id,
+                            "phase": "study1",
+                            "record_id": record_id or "unknown",
+                            "model": "unknown",
+                            "reason": "recordId not found in manifest",
+                            "raw_text": json.dumps(row, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                payload, reason = _extract_batch_payload(row)
+                if payload is None:
+                    invalid_rows.append(
+                        {
+                            "run_id": run_id,
+                            "phase": "study1",
+                            "record_id": record_id,
+                            "model": str(base.get("model_id", "unknown")),
+                            "reason": reason,
+                            "raw_text": json.dumps(row, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                rec_obj = {
+                    "record_id": record_id,
+                    "run_id": run_id,
+                    "phase": "study1",
+                    "model_id": base["model_id"],
+                    "temperature": base["temperature"],
+                    "prompt_type": base["prompt_type"],
+                    "target": base["target"],
+                    "loop_index": base["loop_index"],
+                    "generated_sentence": payload.get("generated_sentence")
+                    or payload.get("sentence")
+                    or payload.get("text")
+                    or "",
+                    "reasoning": payload.get("reasoning") or payload.get("rationale") or "",
+                    "judgment": payload.get("judgment"),
+                }
+
             try:
-                parsed = Study1BatchRow.model_validate(row)
+                parsed = Study1BatchRow.model_validate(rec_obj)
             except Exception as exc:  # noqa: BLE001
                 invalid_rows.append(
                     {
                         "run_id": run_id,
                         "phase": "study1",
-                        "record_id": str(row.get("record_id", "unknown")),
-                        "model": str(row.get("model_id", "unknown")),
+                        "record_id": str(rec_obj.get("record_id", "unknown")),
+                        "model": str(rec_obj.get("model_id", "unknown")),
                         "reason": f"schema validation failed: {exc}",
-                        "raw_text": json.dumps(row, ensure_ascii=False),
+                        "raw_text": json.dumps(rec_obj, ensure_ascii=False),
                     }
                 )
                 continue
@@ -848,6 +1110,7 @@ def _run_prediction_phase(run_id: str, phase: str) -> tuple[list[dict], list[dic
         for key in _s3_list(f"runs/{run_id}/batch-output/{phase}/")
         if key.endswith(".jsonl") and not key.endswith("-job.json")
     ]
+    manifest_index = _load_manifest_index(run_id, phase)
 
     output_rows: list[dict] = []
     invalid_rows: list[dict] = []
@@ -855,17 +1118,85 @@ def _run_prediction_phase(run_id: str, phase: str) -> tuple[list[dict], list[dic
         rows = _s3_get_jsonl(key)
         normalized_rows: list[dict] = []
         for row in rows:
+            if _row_error_message(row):
+                source_record_id = str(
+                    row.get("source_record_id")
+                    or row.get("recordId")
+                    or row.get("modelInput", {}).get("source_record_id")
+                    or "unknown"
+                )
+                invalid_rows.append(
+                    {
+                        "run_id": run_id,
+                        "phase": phase,
+                        "record_id": source_record_id,
+                        "model": str(row.get("predictor_model", "unknown")),
+                        "reason": _row_error_message(row),
+                        "raw_text": json.dumps(row, ensure_ascii=False),
+                    }
+                )
+                continue
+
+            parsed_input: dict
+            if {
+                "source_record_id",
+                "generator_model",
+                "predictor_model",
+                "expected_label",
+                "condition_type",
+                "predicted_label",
+            }.issubset(row):
+                parsed_input = dict(row)
+            else:
+                request_id = str(row.get("recordId") or "")
+                base = manifest_index.get(request_id)
+                if not base:
+                    invalid_rows.append(
+                        {
+                            "run_id": run_id,
+                            "phase": phase,
+                            "record_id": request_id or "unknown",
+                            "model": "unknown",
+                            "reason": "recordId not found in manifest",
+                            "raw_text": json.dumps(row, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                payload, reason = _extract_batch_payload(row)
+                if payload is None:
+                    invalid_rows.append(
+                        {
+                            "run_id": run_id,
+                            "phase": phase,
+                            "record_id": str(base.get("source_record_id", "unknown")),
+                            "model": str(base.get("predictor_model", "unknown")),
+                            "reason": reason,
+                            "raw_text": json.dumps(row, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                parsed_input = {
+                    "source_record_id": base["source_record_id"],
+                    "generator_model": base["generator_model"],
+                    "predictor_model": base["predictor_model"],
+                    "expected_label": base["expected_label"],
+                    "condition_type": base["condition_type"],
+                    "predicted_label": payload.get("predicted_label"),
+                }
+
             try:
-                parsed = PredictionBatchRow.model_validate(row)
+                parsed = PredictionBatchRow.model_validate(parsed_input)
             except Exception as exc:  # noqa: BLE001
                 invalid_rows.append(
                     {
                         "run_id": run_id,
                         "phase": phase,
-                        "record_id": str(row.get("source_record_id", "unknown")),
-                        "model": str(row.get("predictor_model", "unknown")),
+                        "record_id": str(parsed_input.get("source_record_id", "unknown")),
+                        "model": str(parsed_input.get("predictor_model", "unknown")),
                         "reason": f"schema validation failed: {exc}",
-                        "raw_text": json.dumps(row, ensure_ascii=False),
+                        "raw_text": json.dumps(parsed_input, ensure_ascii=False),
                     }
                 )
                 continue
