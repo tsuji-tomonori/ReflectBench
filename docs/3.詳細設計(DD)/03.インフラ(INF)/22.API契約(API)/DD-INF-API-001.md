@@ -3,11 +3,11 @@ id: DD-INF-API-001
 title: run制御API詳細
 doc_type: API詳細
 phase: DD
-version: 1.0.0
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-02'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -80,6 +80,39 @@ tags:
 - 返却されるキーは S3 上の成果物を指し、実データDLは S3（または署名URL）経由とする。
 - DynamoDB は `RunStatus` と成果物ポインタ管理に限定し、CSV/JSONL本文は保持しない。
 
+## S3 IF（API x phase x ファイルCRUD）
+### CRUD定義
+- `C`: `PutObject` による新規作成（同一キー再実行時は実質上書き）
+- `R`: `GetObject` / `ListObjectsV2` による参照
+- `U`: 同一キーへの `PutObject` 上書き更新
+- `D`: 削除（本実装では未使用）
+
+### 公開API単位
+| API | phase | C | R | U | D | 対象キー / Prefix | 動作 |
+|---|---|---:|---:|---:|---:|---|---|
+| `POST /runs` | `STUDY1_ENUMERATE` 初期化前 | 1 | 0 | 0 | 0 | `runs/{run_id}/config.json` | run設定を保存し、durable実行を起動 |
+| `GET /runs/{run_id}` | N/A | 0 | 0 | 0 | 0 | なし（S3不使用） | DynamoDB の `RunStatus` のみ参照 |
+| `GET /runs/{run_id}/artifacts` | N/A | 0 | 1 | 0 | 0 | `runs/{run_id}/config.json`, `runs/{run_id}/reports/`, `runs/{run_id}/normalized/`, `runs/{run_id}/invalid/` | run存在確認後に成果物キー一覧を返却 |
+
+### `POST /runs` 起動後の Orchestrator phase 単位
+| phase | C | R | U | D | 主なS3キー / Prefix | 処理内容 |
+|---|---:|---:|---:|---:|---|---|
+| `STUDY1_ENUMERATE` | 1 | 0 | 0 | 0 | `runs/{run_id}/manifests/study1/{model}/part-xxxxx.jsonl` | Study1入力manifest生成 |
+| `STUDY1_BATCH_SUBMIT` | 1 | 1 | 1 | 0 | `runs/{run_id}/manifests/study1/`, `runs/{run_id}/batch-input/study1/`, `runs/{run_id}/batch-output/study1/*-job.json` | manifest読込 -> Bedrock入力変換 -> jobメタ保存 |
+| `STUDY1_BATCH_POLL` | 0 | 1 | 1 | 0 | `runs/{run_id}/batch-output/study1/*-job.json` | job状態参照、完了時メタ更新 |
+| `STUDY1_NORMALIZE` | 1 | 1 | 0 | 0 | `runs/{run_id}/batch-output/study1/*.jsonl`, `runs/{run_id}/normalized/study1/*.jsonl`, `runs/{run_id}/invalid/study1/{model}/invalid.jsonl` | 出力正規化と不正行退避 |
+| `STUDY2_PREPARE` | 1 | 1 | 0 | 0 | `runs/{run_id}/normalized/study1/`, `runs/{run_id}/manifests/study2_within/`, `runs/{run_id}/manifests/study2_across/`, `runs/{run_id}/manifests/experiment_a_edit/`, `runs/{run_id}/manifests/experiment_d_blind/`, `runs/{run_id}/manifests/experiment_d_wrong_label/` | 下流phase向けmanifest生成 |
+| `STUDY2_WITHIN` | 1 | 1 | 1 | 0 | `runs/{run_id}/manifests/study2_within/`, `runs/{run_id}/batch-input/study2_within/`, `runs/{run_id}/batch-output/study2_within/`, `runs/{run_id}/normalized/study2_within/`, `runs/{run_id}/invalid/study2_within/` | submit/poll/normalize実行 |
+| `STUDY2_ACROSS` | 1 | 1 | 1 | 0 | `runs/{run_id}/manifests/study2_across/`, `runs/{run_id}/batch-input/study2_across/`, `runs/{run_id}/batch-output/study2_across/`, `runs/{run_id}/normalized/study2_across/`, `runs/{run_id}/invalid/study2_across/` | submit/poll/normalize実行 |
+| `EXPERIMENT_A` | 1 | 1 | 1 | 0 | `runs/{run_id}/manifests/experiment_a_edit/`, `runs/{run_id}/normalized/experiment_a_edit/`, `runs/{run_id}/manifests/experiment_a_predict/`, `runs/{run_id}/batch-input/experiment_a_predict/`, `runs/{run_id}/batch-output/experiment_a_predict/`, `runs/{run_id}/normalized/experiment_a/results.jsonl`, `runs/{run_id}/invalid/experiment_a/` | edit -> predict -> 正規化 |
+| `EXPERIMENT_D` | 1 | 1 | 1 | 0 | `runs/{run_id}/manifests/experiment_d_blind/`, `runs/{run_id}/manifests/experiment_d_wrong_label/`, `runs/{run_id}/manifests/experiment_d_predict/`, `runs/{run_id}/batch-input/experiment_d_predict/`, `runs/{run_id}/batch-output/experiment_d_predict/`, `runs/{run_id}/normalized/experiment_d/results.jsonl`, `runs/{run_id}/invalid/experiment_d/` | blind/wrong-label -> predict -> 正規化 |
+| `REPORT` | 1 | 1 | 0 | 0 | `runs/{run_id}/normalized/*`, `runs/{run_id}/reports/study1_summary.csv`, `runs/{run_id}/reports/study2_within.csv`, `runs/{run_id}/reports/study2_across.csv`, `runs/{run_id}/reports/experiment_a.csv`, `runs/{run_id}/reports/experiment_d.csv`, `runs/{run_id}/reports/run_manifest.json` | 正規化済みデータ読込とレポート出力 |
+
+### 補足
+- `D`（`DeleteObject`）は未使用。
+- `U` は `*-job.json` など同一キーへの再書込を指す。
+- `GET /runs/{run_id}/artifacts` は成果物本文ではなくキー一覧を返す。
+
 ## エラー契約
 - `400 Bad Request`: 入力不正（必須不足、制約違反）
 - `404 Not Found`: 未知 `run_id`
@@ -97,4 +130,5 @@ tags:
 - `GET /runs/{run_id}/artifacts` に 5 CSV + `run_manifest.json` が含まれる。
 
 ## 変更履歴
+- 2026-03-02: S3 IF（API x phase x CRUD）を追記し、APIごとのS3ファイル操作境界を明記 [[RQ-FR-004]]
 - 2026-02-28: 初版作成（[[RQ-GL-002|run]]制御APIの入出力契約を定義） [[BD-SYS-ADR-001]]

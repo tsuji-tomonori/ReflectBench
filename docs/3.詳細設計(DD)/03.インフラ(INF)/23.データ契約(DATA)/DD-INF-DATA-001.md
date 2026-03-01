@@ -3,11 +3,11 @@ id: DD-INF-DATA-001
 title: runデータ契約詳細
 doc_type: データ契約
 phase: DD
-version: 1.0.0
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-02'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -29,6 +29,10 @@ tags:
 ## 詳細仕様
 - モデル出力は strict JSON のみ受理し、Pydantic 検証成功分のみ `normalized/` へ保存する。
 - 検証失敗は `invalid/` に退避し、[[RQ-GL-002|run]] 集計は除外継続する。
+
+## 正本参照
+- 本書は S3 キー命名・データ契約（schema/成果物種別）の正本とする。
+- API ごとの S3 操作（どの API のどの phase でどのように CRUD するか）の正本は [[DD-INF-API-001]] を参照する。
 
 ## データ原本境界
 - `RunStatus` と `idempotency_key` の正本は DynamoDB（`run_control_table`）とする。
@@ -150,5 +154,6 @@ tags:
 - 同一条件再実行で `record_id` が一致する。
 
 ## 変更履歴
+- 2026-03-02: API x phase x CRUD の正本参照先を [[DD-INF-API-001]] に明記 [[RQ-FR-004]]
 - 2026-03-02: `batch-input` 契約、`modelInput.messages` 必須、`recordId` 再結合の正規化契約を追記 [[RQ-FR-006]]
 - 2026-02-28: 初版作成（[[RQ-GL-012|canonical schema]] と成果物契約を定義） [[BD-SYS-ADR-001]]
