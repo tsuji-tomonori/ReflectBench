@@ -3,11 +3,11 @@ id: DD-INF-DEP-002
 title: デプロイ詳細（実行パラメータと運用制約）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.3
+version: 1.0.4
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-01'
 up:
   - '[[BD-INF-DEP-001]]'
   - '[[BD-INF-DEP-002]]'
@@ -40,7 +40,7 @@ tags:
 |---|---|---|
 | region | `ap-southeast-2` | 採用モデルを単一リージョンで閉じるため |
 | [[RQ-GL-004|shard]] size | `500` | Batch 最小100件を満たし運用しやすいため |
-| poll interval | `180 sec` | 待機オーバーヘッドと追従性のバランス |
+| poll interval | `180 sec` | non-blocking poll の再確認間隔と追従性のバランス |
 | durable timeout | `7 days` | 長時間 [[RQ-GL-002|run]] を分割せず完走するため |
 | durable retention | `30 days` | 再調査と再実行判断に必要な保持期間 |
 | editor model | `apac.amazon.nova-micro-v1:0` | 追加実験Aの固定前提 |
@@ -138,6 +138,7 @@ tags:
 - 集計 CSV と source [[RQ-GL-002|run]] の関連が `record_id` で逆引きできる。
 
 ## 変更履歴
+- 2026-03-01: poll interval の意味を non-blocking 再確認間隔へ明確化 [[DD-INF-DEP-001]]
 - 2026-02-28: `plan.md` ベースのモデル費見積もりと phase 別費用を追加し、RQ-COST トレースを追記 [[RQ-RDR-002]]
 - 2026-02-28: 実験詳細の正本参照先を DD-APP 群へ追加 [[RQ-RDR-002]]
 - 2026-02-28: API/データ/IAM/監視/CI_CDの正本分離を追記 [[BD-SYS-ADR-001]]

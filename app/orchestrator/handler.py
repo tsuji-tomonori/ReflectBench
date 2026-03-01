@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import os
-import time
 import uuid
 from collections import Counter
 
@@ -406,10 +405,18 @@ def _load_config(run_id: str) -> dict:
     return _s3_get_json(f"runs/{run_id}/config.json")
 
 
+def _encode_model_key(model_id: str) -> str:
+    return model_id.replace(":", "__COLON__")
+
+
+def _decode_model_key(model_key: str) -> str:
+    return model_key.replace("__COLON__", ":")
+
+
 def _model_id_from_manifest_key(manifest_key: str, phase: str) -> str:
     parts = manifest_key.split("/")
     if len(parts) >= 6 and parts[2] == "manifests":
-        return parts[4]
+        return _decode_model_key(parts[4])
 
     rows = _s3_get_jsonl(manifest_key)
     if not rows:
@@ -542,55 +549,51 @@ def _load_jobs_from_metadata(run_id: str, phase: str) -> dict[str, str]:
     return jobs
 
 
-def _poll_batch_jobs(run_id: str, phase: str, jobs: dict[str, str], poll_interval_sec: int) -> None:
+def _poll_batch_jobs(
+    run_id: str, phase: str, jobs: dict[str, str], _poll_interval_sec: int
+) -> bool:
     if not jobs or BATCH_DRY_RUN:
-        return
+        return True
 
-    sleep_seconds = max(1, min(poll_interval_sec, 10))
+    has_pending = False
     for manifest_key, job_identifier in jobs.items():
         metadata_key = _metadata_key_for_manifest(manifest_key, phase)
-        status = "SUBMITTED"
-        for _attempt in range(BATCH_POLL_MAX_ATTEMPTS):
-            try:
-                res = bedrock.get_model_invocation_job(jobIdentifier=job_identifier)
-                status = str(res.get("status", "UNKNOWN"))
-            except Exception as exc:  # noqa: BLE001
-                raise PipelineError(
-                    step=f"{phase.upper()}_BATCH_POLL",
-                    reason=f"failed to poll job {job_identifier}: {exc}",
-                    retryable=True,
-                    category="dependency",
-                ) from exc
-
-            if status in {"Completed", "COMPLETED"}:
-                _s3_put_json(
-                    metadata_key,
-                    {
-                        "job_identifier": job_identifier,
-                        "status": "COMPLETED",
-                        "manifest_key": manifest_key,
-                        "output_key": _output_key_for_manifest(manifest_key, phase),
-                        "completed_at": _now_iso(),
-                        "dry_run": False,
-                    },
-                )
-                break
-            if status in {"Failed", "FAILED", "Stopped", "STOPPED"}:
-                raise PipelineError(
-                    step=f"{phase.upper()}_BATCH_POLL",
-                    reason=f"job {job_identifier} ended with status={status}",
-                    retryable=True,
-                    category="dependency",
-                )
-
-            time.sleep(sleep_seconds)
-        else:
+        try:
+            res = bedrock.get_model_invocation_job(jobIdentifier=job_identifier)
+            status = str(res.get("status", "UNKNOWN"))
+        except Exception as exc:  # noqa: BLE001
             raise PipelineError(
                 step=f"{phase.upper()}_BATCH_POLL",
-                reason=f"job {job_identifier} did not complete within poll attempts",
+                reason=f"failed to poll job {job_identifier}: {exc}",
                 retryable=True,
-                category="timeout",
+                category="dependency",
+            ) from exc
+
+        if status in {"Completed", "COMPLETED"}:
+            _s3_put_json(
+                metadata_key,
+                {
+                    "job_identifier": job_identifier,
+                    "status": "COMPLETED",
+                    "manifest_key": manifest_key,
+                    "output_key": _output_key_for_manifest(manifest_key, phase),
+                    "completed_at": _now_iso(),
+                    "dry_run": False,
+                },
             )
+            continue
+
+        if status in {"Failed", "FAILED", "Stopped", "STOPPED"}:
+            raise PipelineError(
+                step=f"{phase.upper()}_BATCH_POLL",
+                reason=f"job {job_identifier} ended with status={status}",
+                retryable=True,
+                category="dependency",
+            )
+
+        has_pending = True
+
+    return not has_pending
 
 
 def _materialize_dryrun_batch_output_for_phase(run_id: str, phase: str) -> None:
@@ -934,7 +937,7 @@ def _run_experiment_a(
     models: list[str],
     shard_size: int,
     poll_interval_sec: int,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict]] | None:
     edit_keys = [
         key
         for key in _s3_list(f"runs/{run_id}/manifests/experiment_a_edit/")
@@ -977,8 +980,11 @@ def _run_experiment_a(
         shard_size,
         condition_types=["info_plus", "info_minus"],
     )
-    jobs = _submit_batch_jobs(run_id, "experiment_a_predict")
-    _poll_batch_jobs(run_id, "experiment_a_predict", jobs, poll_interval_sec)
+    jobs = _load_jobs_from_metadata(run_id, "experiment_a_predict")
+    if not jobs:
+        jobs = _submit_batch_jobs(run_id, "experiment_a_predict")
+    if not _poll_batch_jobs(run_id, "experiment_a_predict", jobs, poll_interval_sec):
+        return None
     _materialize_dryrun_batch_output_for_phase(run_id, "experiment_a_predict")
     predictions, pred_invalid = _run_prediction_phase(run_id, "experiment_a_predict")
     for row in predictions:
@@ -996,7 +1002,7 @@ def _run_experiment_d(
     models: list[str],
     shard_size: int,
     poll_interval_sec: int,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict]] | None:
     base_rows: list[dict] = []
     invalid_rows: list[dict] = []
     blind_keys = [
@@ -1044,8 +1050,11 @@ def _run_experiment_d(
             base_rows.append({**row, "condition_type": "wrong_label"})
 
     _write_prediction_manifests(run_id, "experiment_d_predict", base_rows, models, shard_size)
-    jobs = _submit_batch_jobs(run_id, "experiment_d_predict")
-    _poll_batch_jobs(run_id, "experiment_d_predict", jobs, poll_interval_sec)
+    jobs = _load_jobs_from_metadata(run_id, "experiment_d_predict")
+    if not jobs:
+        jobs = _submit_batch_jobs(run_id, "experiment_d_predict")
+    if not _poll_batch_jobs(run_id, "experiment_d_predict", jobs, poll_interval_sec):
+        return None
     _materialize_dryrun_batch_output_for_phase(run_id, "experiment_d_predict")
     results, pred_invalid = _run_prediction_phase(run_id, "experiment_d_predict")
     for row in results:
@@ -1158,6 +1167,7 @@ def _generate_study1_manifests(run_id: str, config: dict) -> int:
 
     total = 0
     for model in models:
+        model_key = _encode_model_key(model)
         part = 1
         rows: list[dict] = []
         for temperature in temperatures:
@@ -1185,13 +1195,15 @@ def _generate_study1_manifests(run_id: str, config: dict) -> int:
                             }
                         )
                         if len(rows) == shard_size:
-                            key = f"runs/{run_id}/manifests/study1/{model}/part-{part:05d}.jsonl"
+                            key = (
+                                f"runs/{run_id}/manifests/study1/{model_key}/part-{part:05d}.jsonl"
+                            )
                             _s3_put_jsonl(key, rows)
                             total += len(rows)
                             rows = []
                             part += 1
         if rows:
-            key = f"runs/{run_id}/manifests/study1/{model}/part-{part:05d}.jsonl"
+            key = f"runs/{run_id}/manifests/study1/{model_key}/part-{part:05d}.jsonl"
             _s3_put_jsonl(key, rows)
             total += len(rows)
     return total
@@ -1233,7 +1245,8 @@ def _execute_phase(run_id: str, state: dict, trace_id: str) -> dict:
         jobs = _load_jobs_from_metadata(run_id, "study1")
         if not jobs:
             jobs = _submit_batch_jobs(run_id, "study1")
-        _poll_batch_jobs(run_id, "study1", jobs, poll_interval_sec)
+        if not _poll_batch_jobs(run_id, "study1", jobs, poll_interval_sec):
+            return state
         _materialize_dryrun_batch_output_for_phase(run_id, "study1")
     elif phase == "STUDY1_NORMALIZE":
         _, invalid_rows = _normalize_study1(run_id)
@@ -1243,25 +1256,37 @@ def _execute_phase(run_id: str, state: dict, trace_id: str) -> dict:
         prepared = _prepare_downstream_manifests(run_id, study1_rows, config)
         state["phase_counts"].update(prepared)
     elif phase == "STUDY2_WITHIN":
-        jobs = _submit_batch_jobs(run_id, "study2_within")
-        _poll_batch_jobs(run_id, "study2_within", jobs, poll_interval_sec)
+        jobs = _load_jobs_from_metadata(run_id, "study2_within")
+        if not jobs:
+            jobs = _submit_batch_jobs(run_id, "study2_within")
+        if not _poll_batch_jobs(run_id, "study2_within", jobs, poll_interval_sec):
+            return state
         _materialize_dryrun_batch_output_for_phase(run_id, "study2_within")
         rows, invalid_rows = _run_prediction_phase(run_id, "study2_within")
         state["phase_counts"]["study2_within"] = len(rows)
         state["invalid_counts"]["study2_within"] = len(invalid_rows)
     elif phase == "STUDY2_ACROSS":
-        jobs = _submit_batch_jobs(run_id, "study2_across")
-        _poll_batch_jobs(run_id, "study2_across", jobs, poll_interval_sec)
+        jobs = _load_jobs_from_metadata(run_id, "study2_across")
+        if not jobs:
+            jobs = _submit_batch_jobs(run_id, "study2_across")
+        if not _poll_batch_jobs(run_id, "study2_across", jobs, poll_interval_sec):
+            return state
         _materialize_dryrun_batch_output_for_phase(run_id, "study2_across")
         rows, invalid_rows = _run_prediction_phase(run_id, "study2_across")
         state["phase_counts"]["study2_across"] = len(rows)
         state["invalid_counts"]["study2_across"] = len(invalid_rows)
     elif phase == "EXPERIMENT_A":
-        rows, invalid_rows = _run_experiment_a(run_id, models, shard_size, poll_interval_sec)
+        outcome = _run_experiment_a(run_id, models, shard_size, poll_interval_sec)
+        if outcome is None:
+            return state
+        rows, invalid_rows = outcome
         state["phase_counts"]["experiment_a"] = len(rows)
         state["invalid_counts"]["experiment_a"] = len(invalid_rows)
     elif phase == "EXPERIMENT_D":
-        rows, invalid_rows = _run_experiment_d(run_id, models, shard_size, poll_interval_sec)
+        outcome = _run_experiment_d(run_id, models, shard_size, poll_interval_sec)
+        if outcome is None:
+            return state
+        rows, invalid_rows = outcome
         state["phase_counts"]["experiment_d"] = len(rows)
         state["invalid_counts"]["experiment_d"] = len(invalid_rows)
     elif phase == "REPORT":

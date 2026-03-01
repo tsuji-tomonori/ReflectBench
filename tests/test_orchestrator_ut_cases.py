@@ -97,6 +97,61 @@ def test_submit_batch_jobs_retries_once_per_shard(mod):
     assert metadata_payload["status"] == "SUBMITTED"
 
 
+def test_poll_batch_jobs_returns_false_when_job_still_running(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174010"
+    jobs = {f"runs/{run_id}/manifests/study1/model-a/part-00001.jsonl": "job-1"}
+
+    with (
+        patch.object(mod, "BATCH_DRY_RUN", False),
+        patch.object(
+            mod.bedrock, "get_model_invocation_job", return_value={"status": "InProgress"}
+        ),
+    ):
+        done = mod._poll_batch_jobs(run_id, "study1", jobs, 180)
+
+    assert done is False
+
+
+def test_execute_phase_keeps_cursor_when_study1_poll_pending(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174011"
+    state = {
+        "cursor": mod.PHASES.index("STUDY1_BATCH_POLL"),
+        "retry_count": 0,
+        "phase_counts": {},
+        "invalid_counts": {},
+    }
+
+    with (
+        patch.object(
+            mod,
+            "_load_config",
+            return_value={"poll_interval_sec": 180, "shard_size": 500, "models": []},
+        ),
+        patch.object(mod, "_update_status"),
+        patch.object(mod, "_load_jobs_from_metadata", return_value={"manifest": "job"}),
+        patch.object(mod, "_poll_batch_jobs", return_value=False),
+    ):
+        next_state = mod._execute_phase(run_id, state, "trace-1")
+
+    assert next_state["cursor"] == mod.PHASES.index("STUDY1_BATCH_POLL")
+
+
+def test_run_experiment_a_returns_none_when_poll_pending(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174012"
+
+    with (
+        patch.object(mod, "_s3_list", return_value=[]),
+        patch.object(mod, "_write_prediction_manifests"),
+        patch.object(mod, "_load_jobs_from_metadata", return_value={"manifest": "job"}),
+        patch.object(mod, "_poll_batch_jobs", return_value=False),
+        patch.object(mod, "_run_prediction_phase") as run_prediction,
+    ):
+        out = mod._run_experiment_a(run_id, ["model-a"], 500, 180)
+
+    assert out is None
+    run_prediction.assert_not_called()
+
+
 def test_write_reports_outputs_required_artifacts(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174003"
     with (

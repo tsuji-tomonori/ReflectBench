@@ -3,11 +3,11 @@ id: DD-INF-IAM-001
 title: IAM最小権限設計
 doc_type: セキュリティ詳細
 phase: DD
-version: 1.0.0
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-01'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -41,6 +41,7 @@ tags:
 
 ### `orchestrator_fn_role`
 - `bedrock:CreateModelInvocationJob`, `bedrock:GetModelInvocationJob`
+- Bedrock resource ARN は `foundation-model/*`, `inference-profile/*`, `application-inference-profile/*`, `model-invocation-job/*` を許可する。
 - `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on `runs/{run_id}/*`
 - `dynamodb:GetItem`, `dynamodb:UpdateItem`, `dynamodb:Query` on `run_control_table`
 - `cloudwatch:PutMetricData`（namespace 固定）
@@ -55,6 +56,7 @@ tags:
 - trust policy: `bedrock.amazonaws.com`
 - `s3:GetObject` on input [[RQ-GL-005|manifest]] prefix
 - `s3:PutObject` on batch output prefix
+- `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream` on `foundation-model/*`, `inference-profile/*`, `application-inference-profile/*`
 
 ## 制約
 - `Resource: *` は禁止し、prefix または ARN を明示する。
@@ -71,4 +73,5 @@ tags:
 - IAM変更が `DD-INF-DEP-*` と矛盾しない。
 
 ## 変更履歴
+- 2026-03-01: Bedrock profile/モデル解決の失敗対策として許可リソースと batch service role の invoke 権限を拡張 [[DD-INF-DEP-001]]
 - 2026-02-28: 初版作成（[[RQ-GL-002|run]]実行基盤の最小権限IAMを定義） [[BD-SYS-ADR-001]]

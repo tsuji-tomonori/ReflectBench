@@ -3,11 +3,11 @@ id: DD-INF-DEP-001
 title: デプロイ詳細（Durable Orchestration）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.2
+version: 1.0.3
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-01'
 up:
   - '[[BD-INF-DEP-001]]'
   - '[[BD-INF-DEP-002]]'
@@ -70,7 +70,8 @@ tags:
 2. Batch submit
    - [[RQ-GL-004|shard]] 単位で `CreateModelInvocationJob` を実行する。
 3. Job poll
-   - `GetModelInvocationJob` を 2-5 分間隔で実行し、完了待ちを durable state へ退避する。
+   - 1 invocation あたり 1 回だけ `GetModelInvocationJob` を実行し、未完了なら `cursor` を維持して defer する（ブロッキング待機しない）。
+   - 次回チェックは `orchestrator_fn` の自己再起動で継続し、完了時のみ次 phase に遷移する。
 4. 正規化
    - Batch output を strict JSON として検証し、Pydantic で [[RQ-GL-012|canonical schema]] 化する。
 5. Study2 候補生成
@@ -110,6 +111,7 @@ tags:
 - step failure: `RunStatus` に失敗 step / reason / retry 可否を記録。
 
 ## 変更履歴
+- 2026-03-01: Job poll を non-blocking 化（sleep廃止、1回確認して defer 継続） [[RQ-FR-007]]
 - 2026-02-28: 実験詳細正本を DD-APP 側へ明示（infra/experiment 分担） [[RQ-RDR-002]]
 - 2026-02-28: API/データ/IAM/監視/CI_CDの正本分離を追記 [[BD-SYS-ADR-001]]
 - 2026-02-28: FR/GL への要求トレーサビリティリンクを追加 [[BD-SYS-ADR-001]]

@@ -83,6 +83,18 @@ class ExperimentStack(Stack):
             description="Service role for Bedrock batch input and output access",
         )
         artifacts_bucket.grant_read_write(bedrock_batch_service_role)
+        bedrock_batch_service_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=[
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    "arn:aws:bedrock:*:*:foundation-model/*",
+                    "arn:aws:bedrock:*::inference-profile/*",
+                    "arn:aws:bedrock:*:*:inference-profile/*",
+                    "arn:aws:bedrock:*:*:application-inference-profile/*",
+                ],
+            )
+        )
 
         orchestrator_fn = lambda_.Function(
             self,
@@ -108,9 +120,12 @@ class ExperimentStack(Stack):
             iam.PolicyStatement(
                 actions=["bedrock:CreateModelInvocationJob", "bedrock:GetModelInvocationJob"],
                 resources=[
-                    f"arn:aws:bedrock:{self.region}::foundation-model/*",
-                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/*",
-                    f"arn:aws:bedrock:{self.region}:{self.account}:model-invocation-job/*",
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    "arn:aws:bedrock:*:*:foundation-model/*",
+                    "arn:aws:bedrock:*::inference-profile/*",
+                    "arn:aws:bedrock:*:*:inference-profile/*",
+                    "arn:aws:bedrock:*:*:application-inference-profile/*",
+                    "arn:aws:bedrock:*:*:model-invocation-job/*",
                 ],
             )
         )

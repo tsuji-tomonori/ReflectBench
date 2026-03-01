@@ -3,11 +3,11 @@ id: DD-APP-OVR-001
 title: アプリ詳細設計総論
 doc_type: アプリ詳細
 phase: DD
-version: 1.0.1
+version: 1.0.2
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-01'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -43,7 +43,7 @@ tags:
 3. 新規受付時は `run_id` を発行し、`RunConfig` を保存して durable 起動要求を登録する。
 4. `orchestration` が step を開始し、Study1 列挙（6,600 records）で初期 [[RQ-GL-005|manifest]] を確定する。
 5. `batch_adapter` が [[RQ-GL-004|shard]] 単位で Batch job を投入し、job 状態を `RunStatus` に反映する。
-6. `orchestration` が poll 待機を継続し、完了まで step/state/progress を更新する。
+6. `orchestration` が job 状態を1回確認し、未完了時は同一 phase のまま defer して次 invocation で継続する。
 7. `normalizer` が Batch output を strict JSON + Pydantic で検証し、不正データは `invalid/` へ分離する。
 8. `orchestration` が Study2 候補を生成し、within -> across -> 実験A -> 実験D を順次実行する。
 9. `report_builder` が `reports/*.csv` と `reports/run_manifest.json` を生成し、成果物キーを確定する。
@@ -66,6 +66,7 @@ tags:
 - INF-DD と APP-DD の責務重複がなく、参照境界が明確である。
 
 ## 変更履歴
+- 2026-03-01: poll フローを non-blocking 化（1回確認 + defer）へ更新 [[DD-INF-DEP-001]]
 - 2026-02-28: 実験詳細プロファイル（self/within/across, A/D 閾値）を追記 [[RQ-RDR-002]]
 - 2026-02-28: アプリ処理フロー（受付-列挙-投入-poll-正規化-集計）と APP/INF 責務境界を追記 [[DD-INF-DEP-001]]
 - 2026-02-28: 初版作成（APP詳細の正本境界を定義） [[BD-SYS-ADR-001]]
