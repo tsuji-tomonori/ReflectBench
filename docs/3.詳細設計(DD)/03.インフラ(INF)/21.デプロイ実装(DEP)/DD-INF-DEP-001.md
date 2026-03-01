@@ -3,7 +3,7 @@ id: DD-INF-DEP-001
 title: デプロイ詳細（Durable Orchestration）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.3
+version: 1.0.4
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
@@ -83,6 +83,40 @@ tags:
 9. 実験D 実行（[[RQ-GL-010|blind]] / [[RQ-GL-011|wrong-label]]）
 10. 集計・レポート出力
 
+## phase 遷移図
+```mermaid
+flowchart TD
+  A[POST /runs accepted] --> B[STUDY1_ENUMERATE]
+  B --> C[STUDY1_BATCH_SUBMIT]
+  C --> D[STUDY1_BATCH_POLL]
+  D -->|job pending| D
+  D -->|all completed| E[STUDY1_NORMALIZE]
+  E --> F[STUDY2_PREPARE]
+  F --> G[STUDY2_WITHIN]
+  G -->|job pending| G
+  G --> H[STUDY2_ACROSS]
+  H -->|job pending| H
+  H --> I[EXPERIMENT_A]
+  I -->|job pending| I
+  I --> J[EXPERIMENT_D]
+  J -->|job pending| J
+  J --> K[REPORT]
+  K --> L[FINALIZE]
+```
+
+## state 遷移図
+```mermaid
+stateDiagram-v2
+  [*] --> QUEUED
+  QUEUED --> RUNNING: orchestrator starts
+  RUNNING --> RUNNING: phase deferred (job pending)
+  RUNNING --> SUCCEEDED: all phases done and invalid=0
+  RUNNING --> PARTIAL: all phases done and invalid>0
+  RUNNING --> FAILED: pipeline/internal error
+```
+
+- `state=RUNNING` のまま同一 phase に留まる遷移は、non-blocking poll の defer 再実行を表す。
+
 ## [[RQ-GL-012|canonical schema]]（最小）
 - `Study1Record`: `model_id`, `temperature`, `prompt_type`, `target`, `loop_index`, `generated_sentence`, `reasoning`, `judgment`
 - `PredictionRecord`: `generator_model`, `predictor_model`, `phase`, `source_record_id`, `predicted_label`, `raw_text`
@@ -111,6 +145,7 @@ tags:
 - step failure: `RunStatus` に失敗 step / reason / retry 可否を記録。
 
 ## 変更履歴
+- 2026-03-01: state/phase の遷移図を追記し、defer 時の `RUNNING` 維持を明記 [[RQ-FR-007]]
 - 2026-03-01: Job poll を non-blocking 化（sleep廃止、1回確認して defer 継続） [[RQ-FR-007]]
 - 2026-02-28: 実験詳細正本を DD-APP 側へ明示（infra/experiment 分担） [[RQ-RDR-002]]
 - 2026-02-28: API/データ/IAM/監視/CI_CDの正本分離を追記 [[BD-SYS-ADR-001]]
