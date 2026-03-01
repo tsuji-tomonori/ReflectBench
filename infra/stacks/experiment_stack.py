@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import BundlingOptions, CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_apigatewayv2 as apigwv2
 from aws_cdk import aws_apigatewayv2_integrations as apigwv2_integrations
 from aws_cdk import aws_cloudwatch as cloudwatch
@@ -18,8 +18,34 @@ class ExperimentStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         repo_root = Path(__file__).resolve().parents[2]
-        app_root = repo_root / "app"
         enable_notifications = bool(self.node.try_get_context("enable_notifications"))
+
+        lambda_code = lambda_.Code.from_asset(
+            str(repo_root),
+            bundling=BundlingOptions(
+                image=lambda_.Runtime.PYTHON_3_13.bundling_image,
+                command=[
+                    "bash",
+                    "-lc",
+                    "python -m pip install --no-cache-dir pydantic==2.11.9 "
+                    "-t /asset-output && cp -r app /asset-output/app",
+                ],
+            ),
+            exclude=[
+                "infra/cdk.out",
+                ".git",
+                ".venv",
+                ".mypy_cache",
+                ".pytest_cache",
+                ".ruff_cache",
+                "tests",
+                "docs",
+                "reports",
+                ".opencode",
+                ".ai_workspace",
+                ".github",
+            ],
+        )
 
         artifacts_bucket = s3.Bucket(
             self,
@@ -63,13 +89,14 @@ class ExperimentStack(Stack):
             "OrchestratorFn",
             function_name="orchestrator_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="orchestrator.handler.handler",
-            code=lambda_.Code.from_asset(str(app_root)),
+            handler="app.orchestrator.handler.handler",
+            code=lambda_code,
             timeout=Duration.minutes(15),
             environment={
                 "TABLE_NAME": run_control_table.table_name,
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
                 "BEDROCK_BATCH_ROLE_ARN": bedrock_batch_service_role.role_arn,
+                "METRIC_NAMESPACE": "ReflectBench/Runs",
                 "BATCH_DRY_RUN": "false",
                 "MAX_PHASES_PER_INVOCATION": "1",
                 "LEASE_SECONDS": "300",
@@ -77,20 +104,35 @@ class ExperimentStack(Stack):
                 "ENABLE_NOTIFICATIONS": "true" if enable_notifications else "false",
             },
         )
-        orchestrator_fn.add_environment("SELF_ARN", orchestrator_fn.function_arn)
         orchestrator_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:CreateModelInvocationJob", "bedrock:GetModelInvocationJob"],
                 resources=[
                     f"arn:aws:bedrock:{self.region}::foundation-model/*",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/*",
                     f"arn:aws:bedrock:{self.region}:{self.account}:model-invocation-job/*",
                 ],
             )
         )
         orchestrator_fn.add_to_role_policy(
             iam.PolicyStatement(
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+            )
+        )
+        orchestrator_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[bedrock_batch_service_role.role_arn],
+            )
+        )
+        orchestrator_fn.add_to_role_policy(
+            iam.PolicyStatement(
                 actions=["lambda:InvokeFunction"],
-                resources=[orchestrator_fn.function_arn],
+                resources=[
+                    f"arn:aws:lambda:{self.region}:{self.account}:function:orchestrator_fn",
+                    f"arn:aws:lambda:{self.region}:{self.account}:function:orchestrator_fn:*",
+                ],
             )
         )
 
@@ -106,15 +148,22 @@ class ExperimentStack(Stack):
             "StartRunFn",
             function_name="start_run_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="start_run.handler.handler",
-            code=lambda_.Code.from_asset(str(app_root)),
+            handler="app.start_run.handler.handler",
+            code=lambda_code,
             timeout=Duration.seconds(30),
             environment={
                 "TABLE_NAME": run_control_table.table_name,
                 "TABLE_GSI_NAME": "idempotency_key_index",
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
                 "ORCHESTRATOR_ARN": orchestrator_alias.function_arn,
+                "METRIC_NAMESPACE": "ReflectBench/Runs",
             },
+        )
+        start_run_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+            )
         )
 
         status_fn = lambda_.Function(
@@ -122,8 +171,8 @@ class ExperimentStack(Stack):
             "StatusFn",
             function_name="status_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="status.handler.handler",
-            code=lambda_.Code.from_asset(str(app_root)),
+            handler="app.status.handler.handler",
+            code=lambda_code,
             timeout=Duration.seconds(30),
             environment={
                 "TABLE_NAME": run_control_table.table_name,
@@ -135,8 +184,8 @@ class ExperimentStack(Stack):
             "ArtifactsFn",
             function_name="artifacts_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="artifacts.handler.handler",
-            code=lambda_.Code.from_asset(str(app_root)),
+            handler="app.artifacts.handler.handler",
+            code=lambda_code,
             timeout=Duration.seconds(30),
             environment={
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
