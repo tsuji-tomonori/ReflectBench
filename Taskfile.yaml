@@ -173,11 +173,15 @@ tasks:
           echo "INFRA_DIR not found; skipping infra deploy."
           exit 0
         fi
+        if ! command -v uv >/dev/null 2>&1; then
+          echo "uv is not installed."
+          exit 1
+        fi
         if ! command -v cdk >/dev/null 2>&1; then
           echo "AWS CDK CLI (cdk) is not installed."
           exit 1
         fi
-        cdk deploy --all --require-approval never --app "python3 {{.INFRA_DIR}}/app.py"'
+        uv run --group infra --no-binary cdk deploy --all --require-approval never --app "python3 {{.INFRA_DIR}}/app.py"'
 
   docs:verify:
     desc: Verify deployed docs top page (DOCS_SITE_URL required)
