@@ -203,11 +203,18 @@ class ExperimentStack(Stack):
                 )
             )
 
+        orchestrator_version = orchestrator_fn.current_version
+        # Keep published versions so CloudFormation does not block stack updates
+        # while trying to delete the previous durable orchestrator version.
+        orchestrator_version_cfn = orchestrator_version.node.default_child
+        if isinstance(orchestrator_version_cfn, lambda_.CfnVersion):
+            orchestrator_version_cfn.apply_removal_policy(RemovalPolicy.RETAIN)
+
         orchestrator_alias = lambda_.Alias(
             self,
             "OrchestratorAlias",
             alias_name="live",
-            version=orchestrator_fn.current_version,
+            version=orchestrator_version,
         )
 
         start_run_fn = lambda_.Function(

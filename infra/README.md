@@ -8,6 +8,7 @@ This directory contains the AWS CDK implementation for the `/runs` control API.
 - DynamoDB table for run status and idempotency (`run_control_table`)
 - Lambda functions: `start_run`, `status`, `artifacts`, `orchestrator`
 - Orchestrator alias (`live`) used as invoke target from `start_run`
+- Published orchestrator versions are retained to avoid slow/delete-stuck CloudFormation updates
 - Bedrock Batch service role
 - CloudWatch alarms for orchestrator failures and run health metrics
 - Optional SNS alarm notifications (context `enable_notifications=true`)
