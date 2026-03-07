@@ -1689,9 +1689,13 @@ def _run_child_context(context: DurableContext | None, child_name: str, func):
         return func(child_context)
 
     try:
-        return child_method(child_name, _runner)
+        # Prefer the AWS SDK sample signature: (func, name).
+        return child_method(_runner, child_name)
     except TypeError:
-        return child_method(_runner)
+        try:
+            return child_method(child_name, _runner)
+        except TypeError:
+            return child_method(_runner)
 
 
 def _wait_decision_stop(output_state: dict | None = None):

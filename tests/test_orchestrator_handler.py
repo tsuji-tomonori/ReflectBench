@@ -24,7 +24,7 @@ class FakeDurableContext:
         self.steps.append(name)
         return func()
 
-    def run_in_child_context(self, name, func):
+    def run_in_child_context(self, func, name):
         self.child_contexts.append(name)
         return func(self)
 
@@ -126,6 +126,23 @@ def test_handler_uses_child_context_and_wait_for_condition(mod):
     finalize.assert_called_once()
     assert finalize.call_args.kwargs["state"] == "SUCCEEDED"
     emit_metrics.assert_called_once()
+
+
+def test_run_child_context_falls_back_to_legacy_signature(mod):
+    class LegacyContext:
+        def __init__(self):
+            self.child_contexts = []
+
+        def run_in_child_context(self, name, func):
+            self.child_contexts.append(name)
+            return func(self)
+
+    context = LegacyContext()
+
+    result = mod._run_child_context(context, "study1", lambda child_context: child_context)
+
+    assert result is context
+    assert context.child_contexts[-1] == "study1"
 
 
 def test_handler_finalizes_partial_when_invalid_exists(mod):
