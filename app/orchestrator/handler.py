@@ -103,7 +103,7 @@ WORKFLOW_STEPS = [
 WORKFLOW_STEP_INDEX = {step: idx for idx, (_, step) in enumerate(WORKFLOW_STEPS, start=1)}
 
 PROMPT_TYPES = ["FACTUAL", "NORMAL", "CRAZY"]
-TARGETS = ["像", "ゾウ", "ユニコーン", "マーロック", "アイレット・ドコドコ・ヤッタゼ・ペンギン"]
+TARGETS = ["象", "ゾウ", "ユニコーン", "マーロック", "アイレット・ドコドコ・ヤッタゼ・ペンギン"]
 
 
 class PipelineError(Exception):
