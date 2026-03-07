@@ -1,6 +1,11 @@
+import platform
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
-from aws_cdk import BundlingOptions, CfnOutput, Duration, RemovalPolicy, Stack
+import jsii
+from aws_cdk import BundlingOptions, CfnOutput, Duration, ILocalBundling, RemovalPolicy, Stack
 from aws_cdk import aws_apigatewayv2 as apigwv2
 from aws_cdk import aws_apigatewayv2_integrations as apigwv2_integrations
 from aws_cdk import aws_cloudwatch as cloudwatch
@@ -11,6 +16,48 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from constructs import Construct
+
+
+@jsii.implements(ILocalBundling)
+class LocalUvBundling:
+    def __init__(self, repo_root: Path) -> None:
+        self._repo_root = repo_root
+
+    def try_bundle(self, output_dir: str, _options=None, **_kwargs) -> bool:
+        if sys.version_info[:2] != (3, 13):
+            return False
+        if platform.system() != "Linux" or platform.machine() != "x86_64":
+            return False
+        if shutil.which("uv") is None:
+            return False
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--link-mode",
+                "copy",
+                "--python",
+                sys.executable,
+                "--python-version",
+                "3.13",
+                "--python-platform",
+                "x86_64-manylinux2014",
+                "--target",
+                output_dir,
+                "boto3",
+                "pydantic==2.11.9",
+                "aws-durable-execution-sdk-python",
+            ],
+            check=True,
+            cwd=self._repo_root,
+        )
+        shutil.copytree(self._repo_root / "app", output_path / "app", dirs_exist_ok=True)
+        return True
 
 
 class ExperimentStack(Stack):
@@ -24,10 +71,12 @@ class ExperimentStack(Stack):
             str(repo_root),
             bundling=BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_13.bundling_image,
+                local=LocalUvBundling(repo_root),
                 command=[
                     "bash",
                     "-lc",
-                    "python -m pip install --no-cache-dir pydantic==2.11.9 "
+                    "python -m pip install --no-cache-dir boto3 pydantic==2.11.9 "
+                    "aws-durable-execution-sdk-python "
                     "-t /asset-output && cp -r app /asset-output/app",
                 ],
             ),
@@ -99,7 +148,7 @@ class ExperimentStack(Stack):
         orchestrator_fn = lambda_.Function(
             self,
             "OrchestratorFn",
-            function_name="orchestrator_fn",
+            function_name="orchestrator_durable_fn",
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="app.orchestrator.handler.handler",
             code=lambda_code,
@@ -110,12 +159,18 @@ class ExperimentStack(Stack):
                 "BEDROCK_BATCH_ROLE_ARN": bedrock_batch_service_role.role_arn,
                 "METRIC_NAMESPACE": "ReflectBench/Runs",
                 "BATCH_DRY_RUN": "false",
-                "MAX_PHASES_PER_INVOCATION": "1",
-                "LEASE_SECONDS": "300",
-                "SELF_ARN": "orchestrator_fn",
                 "ENABLE_NOTIFICATIONS": "true" if enable_notifications else "false",
             },
         )
+        orchestrator_cfn = orchestrator_fn.node.default_child
+        if isinstance(orchestrator_cfn, lambda_.CfnFunction):
+            orchestrator_cfn.add_property_override(
+                "DurableConfig",
+                {
+                    "ExecutionTimeout": 604800,
+                    "RetentionPeriodInDays": 30,
+                },
+            )
         orchestrator_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:CreateModelInvocationJob", "bedrock:GetModelInvocationJob"],
@@ -141,15 +196,12 @@ class ExperimentStack(Stack):
                 resources=[bedrock_batch_service_role.role_arn],
             )
         )
-        orchestrator_fn.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["lambda:InvokeFunction"],
-                resources=[
-                    f"arn:aws:lambda:{self.region}:{self.account}:function:orchestrator_fn",
-                    f"arn:aws:lambda:{self.region}:{self.account}:function:orchestrator_fn:*",
-                ],
+        if orchestrator_fn.role is not None:
+            orchestrator_fn.role.add_managed_policy(
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicDurableExecutionRolePolicy"
+                )
             )
-        )
 
         orchestrator_alias = lambda_.Alias(
             self,
@@ -193,6 +245,26 @@ class ExperimentStack(Stack):
                 "TABLE_NAME": run_control_table.table_name,
             },
         )
+        status_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["lambda:GetDurableExecution", "lambda:ListDurableExecutions"],
+                resources=[orchestrator_fn.function_arn, f"{orchestrator_fn.function_arn}:*"],
+            )
+        )
+
+        list_runs_fn = lambda_.Function(
+            self,
+            "ListRunsFn",
+            function_name="list_runs_fn",
+            runtime=lambda_.Runtime.PYTHON_3_13,
+            handler="app.list_runs.handler.handler",
+            code=lambda_code,
+            timeout=Duration.seconds(30),
+            environment={
+                "TABLE_NAME": run_control_table.table_name,
+                "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
+            },
+        )
 
         artifacts_fn = lambda_.Function(
             self,
@@ -210,9 +282,11 @@ class ExperimentStack(Stack):
         run_control_table.grant_read_write_data(start_run_fn)
         run_control_table.grant_read_write_data(orchestrator_fn)
         run_control_table.grant_read_data(status_fn)
+        run_control_table.grant_read_data(list_runs_fn)
         artifacts_bucket.grant_read_write(start_run_fn)
         artifacts_bucket.grant_read_write(orchestrator_fn)
         artifacts_bucket.grant_read(status_fn)
+        artifacts_bucket.grant_read(list_runs_fn)
         artifacts_bucket.grant_read(artifacts_fn)
         orchestrator_alias.grant_invoke(start_run_fn)
 
@@ -232,6 +306,13 @@ class ExperimentStack(Stack):
             methods=[apigwv2.HttpMethod.POST],
             integration=apigwv2_integrations.HttpLambdaIntegration(
                 "StartRunIntegration", handler=start_run_fn
+            ),
+        )
+        http_api.add_routes(
+            path="/runs",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=apigwv2_integrations.HttpLambdaIntegration(
+                "ListRunsIntegration", handler=list_runs_fn
             ),
         )
         http_api.add_routes(

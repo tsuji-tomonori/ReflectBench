@@ -14,6 +14,26 @@ def mod():
     return importlib.import_module("app.orchestrator.handler")
 
 
+class FakeDurableContext:
+    def __init__(self):
+        self.steps = []
+        self.child_contexts = []
+        self.wait_configs = []
+
+    def step(self, name, func):
+        self.steps.append(name)
+        return func()
+
+    def run_in_child_context(self, name, func):
+        self.child_contexts.append(name)
+        return func(self)
+
+    def wait_for_condition(self, config):
+        self.wait_configs.append(config)
+        return {"done": True}
+
+
+
 def test_record_id_is_deterministic(mod):
     first = mod._record_id(
         run_id="123e4567-e89b-42d3-a456-426614174000",
@@ -42,80 +62,114 @@ def test_handler_rejects_invalid_run_id(mod):
     assert res["category"] == "validation"
 
 
-def test_handler_returns_deferred_when_lease_busy(mod):
-    with patch.object(mod, "_acquire_lease", return_value=False):
-        res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
-    assert res["ok"] is True
-    assert res["deferred"] is True
-
-
-def test_handler_finalizes_succeeded_when_all_phases_done(mod):
-    done_state = {
-        "cursor": len(mod.PHASES),
-        "retry_count": 0,
-        "invalid_counts": {},
-        "phase_counts": {},
-    }
+def test_handler_returns_deferred_when_pending_without_durable_context(mod):
     with (
-        patch.object(mod, "_acquire_lease", return_value=True),
-        patch.object(mod, "_load_state", return_value=done_state),
-        patch.object(mod, "_finalize") as finalize,
-        patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
-        patch.object(mod, "_release_lease"),
+        patch.object(mod, "_load_config", return_value={"poll_interval_sec": 10}),
+        patch.object(mod, "_generate_study1_manifests", return_value=1),
+        patch.object(mod, "_submit_batch_jobs", return_value={"manifest": "job-1"}),
+        patch.object(mod, "_load_jobs_from_metadata", return_value={"manifest": "job-1"}),
+        patch.object(mod, "_poll_batch_jobs", return_value=False),
+        patch.object(mod.projection, "mark_running"),
     ):
         res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
 
     assert res["ok"] is True
+    assert res["deferred"] is True
+    assert res["phase"] == "STUDY1"
+    assert res["step"] == "STUDY1_WAIT"
+
+
+def test_handler_uses_child_context_and_wait_for_condition(mod):
+    context = FakeDurableContext()
+
+    with (
+        patch.object(
+            mod,
+            "_load_config",
+            return_value={"poll_interval_sec": 10, "models": [], "shard_size": 500},
+        ),
+        patch.object(mod, "_generate_study1_manifests", return_value=1),
+        patch.object(mod, "_submit_batch_jobs", return_value={"manifest": "job-1"}),
+        patch.object(mod, "_normalize_study1", return_value=([], [])),
+        patch.object(mod, "_prepare_downstream_manifests", return_value={}),
+        patch.object(mod, "_load_normalized_rows", return_value=[]),
+        patch.object(mod, "_run_prediction_phase", return_value=([], [])),
+        patch.object(mod, "_materialize_dryrun_batch_output_for_phase"),
+        patch.object(
+            mod,
+            "_prepare_experiment_a",
+            return_value={"manifest_count": 0, "seed_invalid_key": None},
+        ),
+        patch.object(
+            mod,
+            "_prepare_experiment_d",
+            return_value={"manifest_count": 0, "seed_invalid_key": None},
+        ),
+        patch.object(mod, "_normalize_experiment_a", return_value=([], [])),
+        patch.object(mod, "_normalize_experiment_d", return_value=([], [])),
+        patch.object(mod, "_write_reports"),
+        patch.object(
+            mod,
+            "_write_artifact_index",
+            return_value="runs/r1/reports/artifact_index.json",
+        ),
+        patch.object(mod.projection, "mark_running"),
+        patch.object(mod.projection, "finalize") as finalize,
+        patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
+    ):
+        res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, context)
+
+    assert res["ok"] is True
     assert res["state"] == "SUCCEEDED"
-    assert finalize.call_args.args[1] == "SUCCEEDED"
-    assert emit_metrics.call_args.args[1] == "SUCCEEDED"
+    assert context.child_contexts == ["study1", "study2", "experiment_a", "experiment_d"]
+    assert len(context.wait_configs) == 5
+    finalize.assert_called_once()
+    assert finalize.call_args.kwargs["state"] == "SUCCEEDED"
+    emit_metrics.assert_called_once()
 
 
 def test_handler_finalizes_partial_when_invalid_exists(mod):
-    done_state = {
-        "cursor": len(mod.PHASES),
-        "retry_count": 0,
-        "invalid_counts": {"study1": 1},
-        "phase_counts": {},
-    }
+    def seed_invalid(*_args, **_kwargs):
+        pass
+
+    def run_study1(_context, _run_id, _trace_id, state):
+        state["invalid_counts"]["study1"] = 1
+
     with (
-        patch.object(mod, "_acquire_lease", return_value=True),
-        patch.object(mod, "_load_state", return_value=done_state),
-        patch.object(mod, "_finalize") as finalize,
+        patch.object(mod, "_run_study1", side_effect=run_study1),
+        patch.object(mod, "_run_study2", side_effect=seed_invalid),
+        patch.object(mod, "_run_experiment_a_workflow", side_effect=seed_invalid),
+        patch.object(mod, "_run_experiment_d_workflow", side_effect=seed_invalid),
+        patch.object(mod, "_run_report", side_effect=seed_invalid),
+        patch.object(mod.projection, "finalize") as finalize,
         patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
-        patch.object(mod, "_release_lease"),
     ):
         res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
 
     assert res["ok"] is True
     assert res["state"] == "PARTIAL"
-    assert finalize.call_args.args[1] == "PARTIAL"
-    assert emit_metrics.call_args.args[1] == "PARTIAL"
+    assert finalize.call_args.kwargs["state"] == "PARTIAL"
+    emit_metrics.assert_called_once()
 
 
 def test_handler_returns_pipeline_error_model(mod):
-    initial_state = {"cursor": 0, "retry_count": 0, "invalid_counts": {}, "phase_counts": {}}
     err = mod.PipelineError(
-        step="STUDY1_BATCH_POLL",
+        step="STUDY1_WAIT",
         reason="poll timeout",
         retryable=True,
         category="timeout",
     )
     with (
-        patch.object(mod, "_acquire_lease", return_value=True),
-        patch.object(mod, "_load_state", side_effect=[dict(initial_state), dict(initial_state)]),
-        patch.object(mod, "_execute_phase", side_effect=err),
-        patch.object(mod, "_save_state"),
-        patch.object(mod, "_finalize") as finalize,
+        patch.object(mod, "_run_study1", side_effect=err),
+        patch.object(mod.projection, "finalize") as finalize,
         patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
-        patch.object(mod, "_release_lease"),
     ):
         res = mod.handler({"run_id": "123e4567-e89b-42d3-a456-426614174000"}, None)
 
     assert res["ok"] is False
     assert res["category"] == "timeout"
     assert res["retryable"] is True
-    assert finalize.call_args.kwargs["last_error"]["step"] == "STUDY1_BATCH_POLL"
+    assert finalize.call_args.kwargs["last_error"]["step"] == "STUDY1_WAIT"
     assert emit_metrics.call_args.args[1] == "FAILED"
 
 

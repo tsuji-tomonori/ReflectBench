@@ -194,28 +194,25 @@ def test_poll_batch_jobs_returns_false_when_job_still_running(mod):
     assert done is False
 
 
-def test_execute_phase_keeps_cursor_when_study1_poll_pending(mod):
+def test_write_artifact_index_lists_expected_prefixes(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174011"
-    state = {
-        "cursor": mod.PHASES.index("STUDY1_BATCH_POLL"),
-        "retry_count": 0,
-        "phase_counts": {},
-        "invalid_counts": {},
-    }
 
     with (
-        patch.object(
-            mod,
-            "_load_config",
-            return_value={"poll_interval_sec": 180, "shard_size": 500, "models": []},
-        ),
-        patch.object(mod, "_update_status"),
-        patch.object(mod, "_load_jobs_from_metadata", return_value={"manifest": "job"}),
-        patch.object(mod, "_poll_batch_jobs", return_value=False),
+        patch.object(mod, "_s3_list") as s3_list,
+        patch.object(mod, "_s3_put_json") as put_json,
     ):
-        next_state = mod._execute_phase(run_id, state, "trace-1")
+        s3_list.side_effect = [
+            [f"runs/{run_id}/reports/run_manifest.json"],
+            [f"runs/{run_id}/normalized/study1/results.jsonl"],
+            [f"runs/{run_id}/invalid/study1.jsonl"],
+        ]
+        key = mod._write_artifact_index(run_id)
 
-    assert next_state["cursor"] == mod.PHASES.index("STUDY1_BATCH_POLL")
+    assert key == f"runs/{run_id}/reports/artifact_index.json"
+    payload = put_json.call_args.args[1]
+    assert payload["reports"] == [f"runs/{run_id}/reports/run_manifest.json"]
+    assert payload["normalized"] == [f"runs/{run_id}/normalized/study1/results.jsonl"]
+    assert payload["invalid"] == [f"runs/{run_id}/invalid/study1.jsonl"]
 
 
 def test_run_experiment_a_returns_none_when_poll_pending(mod):

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.common.api import json_response, problem_response, trace_id_from_event
 from app.common.models import DEFAULT_MODELS, RunCreateRequest
+from app.orchestrator import projection
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -23,7 +24,6 @@ cloudwatch = boto3.client("cloudwatch")
 TABLE_NAME = os.environ["TABLE_NAME"]
 ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
 ORCHESTRATOR_ARN = os.environ["ORCHESTRATOR_ARN"]
-EDITOR_MODEL = "apac.amazon.nova-micro-v1:0"
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "ReflectBench/Run")
 
 
@@ -32,14 +32,17 @@ def _now_iso() -> str:
 
 
 def _request_hash(payload: RunCreateRequest | dict) -> str:
+    request: RunCreateRequest
     if isinstance(payload, dict):
-        payload = RunCreateRequest.model_validate(payload)
+        request = RunCreateRequest.model_validate(payload)
+    else:
+        request = payload
     stable = {
-        "loops": payload.loops,
-        "full_cross": payload.full_cross,
-        "shard_size": payload.shard_size,
-        "poll_interval_sec": payload.poll_interval_sec,
-        "editor_model": payload.editor_model,
+        "loops": request.loops,
+        "full_cross": request.full_cross,
+        "shard_size": request.shard_size,
+        "poll_interval_sec": request.poll_interval_sec,
+        "editor_model": request.editor_model,
     }
     text = json.dumps(stable, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -58,12 +61,23 @@ def _load_idempotency(idempotency_key: str) -> dict | None:
     return res.get("Item")
 
 
-def _accepted_body(run_id: str, accepted_at: str, phase: str, state: str) -> dict:
+def _accepted_body(
+    run_id: str,
+    accepted_at: str,
+    phase: str,
+    step: str,
+    state: str,
+    execution_name: str,
+    durable_execution_arn: str | None = None,
+) -> dict:
     return {
         "run_id": run_id,
         "accepted_at": accepted_at,
-        "initial_phase": phase,
+        "phase": phase,
+        "step": step,
         "state": state,
+        "execution_name": execution_name,
+        "durable_execution_arn": durable_execution_arn,
     }
 
 
@@ -158,7 +172,14 @@ def handler(event, _context):
                 )
                 return json_response(
                     202,
-                    _accepted_body(existing_run_id, accepted_at, "STUDY1_ENUMERATE", "QUEUED"),
+                    _accepted_body(
+                        existing_run_id,
+                        accepted_at,
+                        "STUDY1",
+                        "STUDY1_ENUMERATE",
+                        "QUEUED",
+                        existing_run_id,
+                    ),
                     trace_id,
                 )
 
@@ -174,15 +195,16 @@ def handler(event, _context):
 
     run_id = str(uuid.uuid4())
     config_key = f"runs/{run_id}/config.json"
+    execution_name = run_id
     run_config = {
         "run_id": run_id,
         "region": "ap-southeast-2",
         "models": DEFAULT_MODELS,
-        "loops": 10,
-        "full_cross": True,
+        "loops": request.loops,
+        "full_cross": request.full_cross,
         "shard_size": request.shard_size,
         "poll_interval_sec": request.poll_interval_sec,
-        "editor_model": EDITOR_MODEL,
+        "editor_model": request.editor_model,
         "created_at": accepted_at,
     }
 
@@ -194,28 +216,13 @@ def handler(event, _context):
             ContentType="application/json",
         )
 
-        run_item = {
-            "run_id": {"S": run_id},
-            "phase": {"S": "STUDY1_ENUMERATE"},
-            "state": {"S": "QUEUED"},
-            "retry_count": {"N": "0"},
-            "progress": {
-                "M": {
-                    "completed_steps": {"N": "0"},
-                    "total_steps": {"N": "10"},
-                    "percent": {"N": "0"},
-                }
-            },
-            "request_hash": {"S": request_hash},
-            "config_s3_key": {"S": config_key},
-            "created_at": {"S": accepted_at},
-            "updated_at": {"S": accepted_at},
-            "orchestration_state": {
-                "S": json.dumps(
-                    {"cursor": 0, "phase_counts": {}, "invalid_counts": {}}, ensure_ascii=False
-                )
-            },
-        }
+        run_item = projection.build_run_item(
+            run_id=run_id,
+            accepted_at=accepted_at,
+            request_hash=request_hash,
+            config_s3_key=config_key,
+            execution_name=execution_name,
+        )
 
         transact_items = [
             {
@@ -247,13 +254,38 @@ def handler(event, _context):
 
         dynamodb.transact_write_items(TransactItems=transact_items)
 
-        lambda_client.invoke(
+        invoke_response = lambda_client.invoke(
             FunctionName=ORCHESTRATOR_ARN,
             InvocationType="Event",
+            DurableExecutionName=execution_name,
             Payload=json.dumps({"run_id": run_id, "trace_id": trace_id}).encode("utf-8"),
+        )
+        durable_execution_arn = invoke_response.get("DurableExecutionArn")
+        projection.save_execution_metadata(
+            run_id=run_id,
+            execution_name=execution_name,
+            durable_execution_arn=durable_execution_arn,
         )
         _emit_run_started_metric(run_id, trace_id)
     except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "DurableExecutionAlreadyStartedException":
+            projection.save_execution_metadata(
+                run_id=run_id,
+                execution_name=execution_name,
+                durable_execution_arn=None,
+            )
+            return json_response(
+                202,
+                _accepted_body(
+                    run_id,
+                    accepted_at,
+                    "STUDY1",
+                    "STUDY1_ENUMERATE",
+                    "QUEUED",
+                    execution_name,
+                ),
+                trace_id,
+            )
         if (
             exc.response.get("Error", {}).get("Code") == "TransactionCanceledException"
             and request.idempotency_key
@@ -264,7 +296,14 @@ def handler(event, _context):
                 if linked:
                     return json_response(
                         202,
-                        _accepted_body(linked, accepted_at, "STUDY1_ENUMERATE", "QUEUED"),
+                        _accepted_body(
+                            linked,
+                            accepted_at,
+                            "STUDY1",
+                            "STUDY1_ENUMERATE",
+                            "QUEUED",
+                            linked,
+                        ),
                         trace_id,
                     )
             return problem_response(
@@ -294,5 +333,15 @@ def handler(event, _context):
         )
     )
     return json_response(
-        202, _accepted_body(run_id, accepted_at, "STUDY1_ENUMERATE", "QUEUED"), trace_id
+        202,
+        _accepted_body(
+            run_id,
+            accepted_at,
+            "STUDY1",
+            "STUDY1_ENUMERATE",
+            "QUEUED",
+            execution_name,
+            durable_execution_arn if "durable_execution_arn" in locals() else None,
+        ),
+        trace_id,
     )

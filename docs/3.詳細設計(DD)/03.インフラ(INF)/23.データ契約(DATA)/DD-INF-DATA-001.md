@@ -3,11 +3,11 @@ id: DD-INF-DATA-001
 title: runデータ契約詳細
 doc_type: データ契約
 phase: DD
-version: 1.1.0
+version: 1.2.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-02'
+updated: '2026-03-06'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -37,7 +37,7 @@ tags:
 ## データ原本境界
 - `RunStatus` と `idempotency_key` の正本は DynamoDB（`run_control_table`）とする。
 - 実験の成果物本文（JSONL/CSV/manifest/batch-output）は S3 を正本とする。
-- `GET /runs/{run_id}` は DynamoDB を参照し、`GET /runs/{run_id}/artifacts` は S3 キー契約を返す。
+- `GET /runs` と `GET /runs/{run_id}` は DynamoDB を参照し、`GET /runs/{run_id}/artifacts` は S3 キー契約を返す。
 
 ## [[RQ-GL-012|canonical schema]]
 ### `RunConfig`
@@ -63,6 +63,35 @@ tags:
 | `last_error` | object\|null | No | `step`,`reason`,`retryable` |
 | `started_at` | string(datetime)\|null | No | 実行開始 |
 | `finished_at` | string(datetime)\|null | No | 実行完了 |
+| `execution_name` | string\|null | No | durable execution 名 |
+| `durable_execution_arn` | string\|null | No | durable execution ARN |
+| `artifact_index_key` | string\|null | No | 成果物索引キー |
+
+### `RunListItem`
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `run_id` | string | Yes | 実行ID |
+| `phase` | string | Yes | 現在フェーズ |
+| `step` | string\|null | No | 現在 step |
+| `state` | string | Yes | `QUEUED/RUNNING/SUCCEEDED/FAILED/PARTIAL` |
+| `progress` | object | Yes | `completed_steps`,`total_steps`,`percent` |
+| `created_at` | string(datetime)\|null | No | 受付時刻 |
+| `updated_at` | string(datetime)\|null | No | 最終更新時刻 |
+| `started_at` | string(datetime)\|null | No | 実行開始 |
+| `finished_at` | string(datetime)\|null | No | 実行完了 |
+| `execution_name` | string\|null | No | durable execution 名 |
+| `durable_execution_arn` | string\|null | No | durable execution ARN |
+| `s3_status` | object | Yes | S3 状況サマリ |
+
+### `RunS3Status`
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `config_exists` | boolean | Yes | `config.json` 存在有無 |
+| `artifact_index_exists` | boolean | Yes | `reports/artifact_index.json` 存在有無 |
+| `reports` | object | Yes | `count`,`latest_key`,`latest_modified_at` |
+| `normalized` | object | Yes | `count`,`latest_key`,`latest_modified_at` |
+| `invalid` | object | Yes | `count`,`latest_key`,`latest_modified_at` |
+| `batch_output` | object | Yes | `count`,`latest_key`,`latest_modified_at` |
 
 ### `RunControl`（DynamoDB保存）
 | フィールド | 型 | 必須 | 説明 |
@@ -75,7 +104,9 @@ tags:
 | `progress` | object | Yes | `completed_steps`,`total_steps`,`percent` |
 | `retry_count` | integer | Yes | 累積 retry 回数 |
 | `last_error` | object\|null | No | `step`,`reason`,`retryable` |
-| `artifacts_index` | object\|null | No | reports/normalized/invalid の代表キー |
+| `execution_name` | string\|null | No | durable execution 名 |
+| `durable_execution_arn` | string\|null | No | durable execution ARN |
+| `artifact_index_key` | string\|null | No | reports/normalized/invalid の索引キー |
 | `updated_at` | string(datetime) | Yes | 最終更新時刻 |
 
 ### `Study1Record`
@@ -135,6 +166,7 @@ tags:
 - `runs/{run_id}/reports/experiment_a.csv`
 - `runs/{run_id}/reports/experiment_d.csv`
 - `runs/{run_id}/reports/run_manifest.json`
+- `runs/{run_id}/reports/artifact_index.json`
 
 ## `run_manifest.json`
 | キー | 型 | 内容 |
@@ -151,9 +183,11 @@ tags:
 - strict JSON + Pydantic 検証の成功/失敗で `normalized/` と `invalid/` が分離される。
 - `batch-output/` は `recordId` で manifest と再結合して正規化される。
 - `run_manifest.json` から [[RQ-GL-003|phase]]別件数、retry、invalid を追跡できる。
+- `artifact_index.json` または prefix 集計により run 一覧APIから S3 状況を把握できる。
 - 同一条件再実行で `record_id` が一致する。
 
 ## 変更履歴
+- 2026-03-06: `RunListItem` / `RunS3Status` と `artifact_index.json` を追記 [[DD-INF-API-001]]
 - 2026-03-02: API x phase x CRUD の正本参照先を [[DD-INF-API-001]] に明記 [[RQ-FR-004]]
 - 2026-03-02: `batch-input` 契約、`modelInput.messages` 必須、`recordId` 再結合の正規化契約を追記 [[RQ-FR-006]]
 - 2026-02-28: 初版作成（[[RQ-GL-012|canonical schema]] と成果物契約を定義） [[BD-SYS-ADR-001]]

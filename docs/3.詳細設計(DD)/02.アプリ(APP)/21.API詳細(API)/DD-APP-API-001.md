@@ -3,11 +3,11 @@ id: DD-APP-API-001
 title: run制御APIアプリ実装詳細
 doc_type: API詳細
 phase: DD
-version: 1.0.0
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-06'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -42,6 +42,14 @@ tags:
 1. `run_id` 形式を検証する。
 2. DynamoDB から `RunStatus` を取得し [[RQ-GL-003|phase]]/state/progress を整形する。
 3. `last_error` は欠損時 `null` を返す。
+4. `durable_execution_arn` がある場合のみ durable execution 状態を補強する。
+
+### `GET /runs`
+1. `limit` と `next_token` を検証する。
+2. DynamoDB から idempotency 行を除いた run summary を走査する。
+3. `created_at` 降順へ整列し、ページング対象の run を決定する。
+4. 各 run の `artifact_index.json` または S3 prefix を読み、S3 状況サマリを付加する。
+5. `runs[]`, `returned_count`, `total_count`, `next_token` を返す。
 
 ### `GET /runs/{run_id}/artifacts`
 1. S3 の reports/normalized/invalid prefix を列挙する。
@@ -54,8 +62,10 @@ tags:
 - 未知 `run_id` は `404` とし、内部エラー詳細は露出しない。
 
 ## 受入条件
-- 3 API すべてで固定制約とエラー契約が一貫している。
+- 4 API すべてで固定制約とエラー契約が一貫している。
 - 同一 `idempotency_key` の再送で重複起動が発生しない。
+- run 一覧APIから run_id と S3 状況が把握できる。
 
 ## 変更履歴
+- 2026-03-06: `GET /runs` の処理順を追加し、status の durable 補強処理を追記 [[DD-INF-API-001]]
 - 2026-02-28: 初版作成（[[RQ-GL-002|run]]制御APIのアプリ実装規約を定義） [[BD-SYS-ADR-001]]

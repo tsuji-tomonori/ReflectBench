@@ -12,6 +12,57 @@ import boto3
 
 from app.common.api import is_valid_run_id
 from app.common.models import PredictionBatchRow, Study1BatchRow
+from app.orchestrator import projection
+
+try:
+    from aws_durable_execution_sdk_python import DurableContext, durable_execution
+    from aws_durable_execution_sdk_python.config import Duration
+    from aws_durable_execution_sdk_python.waits import (
+        WaitForConditionConfig,
+        WaitForConditionDecision,
+    )
+except Exception:  # noqa: BLE001
+    DurableContext = object
+
+    def durable_execution(func):
+        return func
+
+    class Duration:  # type: ignore[no-redef]
+        @staticmethod
+        def from_seconds(seconds: int) -> int:
+            return seconds
+
+    class WaitForConditionConfig:  # type: ignore[no-redef]
+        def __init__(
+            self,
+            *,
+            wait_condition_check,
+            wait_condition_decider,
+            initial_state: dict,
+        ) -> None:
+            self.wait_condition_check = wait_condition_check
+            self.wait_condition_decider = wait_condition_decider
+            self.initial_state = initial_state
+
+    class WaitForConditionDecision:  # type: ignore[no-redef]
+        def __init__(
+            self,
+            *,
+            done: bool,
+            next_wait_duration: int | None = None,
+            output_state: dict | None = None,
+        ) -> None:
+            self.done = done
+            self.next_wait_duration = next_wait_duration
+            self.output_state = output_state
+
+        @classmethod
+        def stop_waiting(cls, output_state: dict | None = None):
+            return cls(done=True, output_state=output_state)
+
+        @classmethod
+        def continue_waiting(cls, duration: int, output_state: dict | None = None):
+            return cls(done=False, next_wait_duration=duration, output_state=output_state)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,33 +70,37 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 bedrock = boto3.client("bedrock")
-lambda_client = boto3.client("lambda")
 cloudwatch = boto3.client("cloudwatch")
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
 BEDROCK_BATCH_ROLE_ARN = os.environ.get("BEDROCK_BATCH_ROLE_ARN")
-SELF_ARN = os.environ.get("SELF_ARN", "")
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "ReflectBench/Run")
 
 DEFAULT_POLL_INTERVAL_SEC = int(os.environ.get("DEFAULT_POLL_INTERVAL_SEC", "180"))
 BATCH_POLL_MAX_ATTEMPTS = int(os.environ.get("BATCH_POLL_MAX_ATTEMPTS", "20"))
 BATCH_DRY_RUN = os.environ.get("BATCH_DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
-LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "300"))
-MAX_PHASES_PER_INVOCATION = int(os.environ.get("MAX_PHASES_PER_INVOCATION", "1"))
-
-PHASES = [
-    "STUDY1_ENUMERATE",
-    "STUDY1_BATCH_SUBMIT",
-    "STUDY1_BATCH_POLL",
-    "STUDY1_NORMALIZE",
-    "STUDY2_PREPARE",
-    "STUDY2_WITHIN",
-    "STUDY2_ACROSS",
-    "EXPERIMENT_A",
-    "EXPERIMENT_D",
-    "REPORT",
+WORKFLOW_STEPS = [
+    ("STUDY1", "STUDY1_ENUMERATE"),
+    ("STUDY1", "STUDY1_SUBMIT"),
+    ("STUDY1", "STUDY1_WAIT"),
+    ("STUDY1", "STUDY1_NORMALIZE"),
+    ("STUDY2", "STUDY2_PREPARE"),
+    ("STUDY2", "STUDY2_WITHIN_SUBMIT"),
+    ("STUDY2", "STUDY2_WITHIN_WAIT"),
+    ("STUDY2", "STUDY2_WITHIN_NORMALIZE"),
+    ("STUDY2", "STUDY2_ACROSS_SUBMIT"),
+    ("STUDY2", "STUDY2_ACROSS_WAIT"),
+    ("STUDY2", "STUDY2_ACROSS_NORMALIZE"),
+    ("EXPERIMENT_A", "EXPERIMENT_A_SUBMIT"),
+    ("EXPERIMENT_A", "EXPERIMENT_A_WAIT"),
+    ("EXPERIMENT_A", "EXPERIMENT_A_NORMALIZE"),
+    ("EXPERIMENT_D", "EXPERIMENT_D_SUBMIT"),
+    ("EXPERIMENT_D", "EXPERIMENT_D_WAIT"),
+    ("EXPERIMENT_D", "EXPERIMENT_D_NORMALIZE"),
+    ("REPORT", "REPORT_GENERATE"),
 ]
+WORKFLOW_STEP_INDEX = {step: idx for idx, (_, step) in enumerate(WORKFLOW_STEPS, start=1)}
 
 PROMPT_TYPES = ["FACTUAL", "NORMAL", "CRAZY"]
 TARGETS = ["像", "ゾウ", "ユニコーン", "マーロック", "アイレット・ドコドコ・ヤッタゼ・ペンギン"]
@@ -251,154 +306,6 @@ def _get_run_item(run_id: str) -> dict:
             category="validation",
         )
     return item
-
-
-def _load_state(run_id: str) -> dict:
-    item = _get_run_item(run_id)
-    raw = item.get("orchestration_state", {}).get("S")
-    if not raw:
-        return {"cursor": 0, "phase_counts": {}, "invalid_counts": {}, "retry_count": 0}
-    state = json.loads(raw)
-    state.setdefault("cursor", 0)
-    state.setdefault("phase_counts", {})
-    state.setdefault("invalid_counts", {})
-    state.setdefault("retry_count", 0)
-    return state
-
-
-def _save_state(run_id: str, state: dict) -> None:
-    dynamodb.update_item(
-        TableName=TABLE_NAME,
-        Key={"run_id": {"S": run_id}},
-        UpdateExpression="SET orchestration_state = :s, updated_at = :u",
-        ExpressionAttributeValues={
-            ":s": {"S": json.dumps(state, ensure_ascii=False)},
-            ":u": {"S": _now_iso()},
-        },
-    )
-
-
-def _acquire_lease(run_id: str, owner: str) -> bool:
-    now = int(_now().timestamp())
-    lease_until = now + LEASE_SECONDS
-    try:
-        dynamodb.update_item(
-            TableName=TABLE_NAME,
-            Key={"run_id": {"S": run_id}},
-            UpdateExpression="SET lease_owner = :owner, lease_until = :lease_until",
-            ConditionExpression=(
-                "attribute_not_exists(lease_until) OR lease_until < :now OR lease_owner = :owner"
-            ),
-            ExpressionAttributeValues={
-                ":owner": {"S": owner},
-                ":lease_until": {"N": str(lease_until)},
-                ":now": {"N": str(now)},
-            },
-        )
-        return True
-    except dynamodb.exceptions.ConditionalCheckFailedException:
-        return False
-
-
-def _release_lease(run_id: str, owner: str) -> None:
-    try:
-        dynamodb.update_item(
-            TableName=TABLE_NAME,
-            Key={"run_id": {"S": run_id}},
-            UpdateExpression="REMOVE lease_owner, lease_until",
-            ConditionExpression="lease_owner = :owner",
-            ExpressionAttributeValues={":owner": {"S": owner}},
-        )
-    except dynamodb.exceptions.ConditionalCheckFailedException:
-        return
-
-
-def _update_status(
-    run_id: str,
-    *,
-    phase: str,
-    state: str,
-    completed: int,
-    retry_count: int,
-    trace_id: str,
-    step: str,
-    last_error: dict | None = None,
-) -> None:
-    percent = int((completed / len(PHASES)) * 100)
-    now = _now_iso()
-
-    expr = (
-        "SET phase = :phase, #state = :state, progress = :progress, retry_count = :retry_count, "
-        "updated_at = :updated_at, started_at = if_not_exists(started_at, :updated_at)"
-    )
-    values: dict = {
-        ":phase": {"S": phase},
-        ":state": {"S": state},
-        ":progress": {
-            "M": {
-                "completed_steps": {"N": str(completed)},
-                "total_steps": {"N": str(len(PHASES))},
-                "percent": {"N": str(percent)},
-            }
-        },
-        ":retry_count": {"N": str(retry_count)},
-        ":updated_at": {"S": now},
-    }
-
-    if last_error is not None:
-        expr += ", last_error = :last_error"
-        values[":last_error"] = {
-            "M": {
-                "step": {"S": str(last_error.get("step", step))},
-                "reason": {"S": str(last_error.get("reason", "unknown"))[:500]},
-                "retryable": {"BOOL": bool(last_error.get("retryable", False))},
-                "category": {"S": str(last_error.get("category", "internal"))},
-                "trace_id": {"S": trace_id},
-            }
-        }
-
-    dynamodb.update_item(
-        TableName=TABLE_NAME,
-        Key={"run_id": {"S": run_id}},
-        UpdateExpression=expr,
-        ExpressionAttributeNames={"#state": "state"},
-        ExpressionAttributeValues=values,
-    )
-
-
-def _finalize(
-    run_id: str, state: str, retry_count: int, trace_id: str, last_error: dict | None = None
-) -> None:
-    expr = (
-        "SET phase = :phase, #state = :state, finished_at = :finished_at, updated_at = :updated_at"
-    )
-    values: dict = {
-        ":phase": {"S": "REPORT"},
-        ":state": {"S": state},
-        ":finished_at": {"S": _now_iso()},
-        ":updated_at": {"S": _now_iso()},
-    }
-    if last_error is not None:
-        expr += ", last_error = :last_error"
-        values[":last_error"] = {
-            "M": {
-                "step": {"S": str(last_error.get("step", "ORCHESTRATOR"))},
-                "reason": {"S": str(last_error.get("reason", "unknown"))[:500]},
-                "retryable": {"BOOL": bool(last_error.get("retryable", False))},
-                "category": {"S": str(last_error.get("category", "internal"))},
-                "trace_id": {"S": trace_id},
-            }
-        }
-    expr += ", retry_count = :retry_count"
-    values[":retry_count"] = {"N": str(retry_count)}
-
-    dynamodb.update_item(
-        TableName=TABLE_NAME,
-        Key={"run_id": {"S": run_id}},
-        UpdateExpression=expr,
-        ExpressionAttributeNames={"#state": "state"},
-        ExpressionAttributeValues=values,
-    )
 
 
 def _load_config(run_id: str) -> dict:
@@ -762,9 +669,9 @@ def _extract_text_from_model_output(payload: object) -> str | None:
     if not isinstance(payload, dict):
         return None
 
-    text = payload.get("text")
-    if isinstance(text, str) and text.strip():
-        return text.strip()
+    text_value = payload.get("text")
+    if isinstance(text_value, str) and text_value.strip():
+        return text_value.strip()
 
     for key in ("content", "message", "output", "modelOutput", "response", "body"):
         value = payload.get(key)
@@ -892,8 +799,8 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
                 rec_obj = dict(row)
             else:
                 record_id = str(row.get("recordId") or row.get("record_id") or "")
-                base = manifest_index.get(record_id)
-                if not base:
+                manifest_row = manifest_index.get(record_id)
+                if not manifest_row:
                     invalid_rows.append(
                         {
                             "run_id": run_id,
@@ -913,7 +820,7 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
                             "run_id": run_id,
                             "phase": "study1",
                             "record_id": record_id,
-                            "model": str(base.get("model_id", "unknown")),
+                            "model": str(manifest_row.get("model_id", "unknown")),
                             "reason": reason,
                             "raw_text": json.dumps(row, ensure_ascii=False),
                         }
@@ -924,11 +831,11 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
                     "record_id": record_id,
                     "run_id": run_id,
                     "phase": "study1",
-                    "model_id": base["model_id"],
-                    "temperature": base["temperature"],
-                    "prompt_type": base["prompt_type"],
-                    "target": base["target"],
-                    "loop_index": base["loop_index"],
+                    "model_id": manifest_row["model_id"],
+                    "temperature": manifest_row["temperature"],
+                    "prompt_type": manifest_row["prompt_type"],
+                    "target": manifest_row["target"],
+                    "loop_index": manifest_row["loop_index"],
                     "generated_sentence": payload.get("generated_sentence")
                     or payload.get("sentence")
                     or payload.get("text")
@@ -1540,101 +1447,676 @@ def _generate_study1_manifests(run_id: str, config: dict) -> int:
     return total
 
 
-def _invoke_self(run_id: str, trace_id: str) -> None:
-    if not SELF_ARN:
-        return
-    lambda_client.invoke(
-        FunctionName=SELF_ARN,
-        InvocationType="Event",
-        Payload=json.dumps({"run_id": run_id, "trace_id": trace_id}).encode("utf-8"),
+def _write_artifact_index(run_id: str) -> str:
+    key = f"runs/{run_id}/reports/artifact_index.json"
+    _s3_put_json(
+        key,
+        {
+            "run_id": run_id,
+            "reports": _s3_list(f"runs/{run_id}/reports/"),
+            "normalized": _s3_list(f"runs/{run_id}/normalized/"),
+            "invalid": _s3_list(f"runs/{run_id}/invalid/"),
+        },
     )
+    return key
 
 
-def _execute_phase(run_id: str, state: dict, trace_id: str) -> dict:
-    cursor = int(state.get("cursor", 0))
-    phase = PHASES[cursor]
-    config = _load_config(run_id)
-    models = list(config.get("models", []))
-    poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
-    shard_size = int(config.get("shard_size", 500))
+def _save_temp_rows(run_id: str, name: str, rows: list[dict]) -> str:
+    key = f"runs/{run_id}/tmp/{name}.jsonl"
+    _s3_put_jsonl(key, rows)
+    return key
 
-    _update_status(
+
+def _load_temp_rows(key: str | None) -> list[dict]:
+    if not key:
+        return []
+    return _s3_get_jsonl(key)
+
+
+def _prepare_experiment_a(run_id: str, models: list[str], shard_size: int) -> dict:
+    edit_keys = [
+        key
+        for key in _s3_list(f"runs/{run_id}/manifests/experiment_a_edit/")
+        if key.endswith(".jsonl")
+    ]
+    edited_rows: list[dict] = []
+    invalid_rows: list[dict] = []
+
+    for key in edit_keys:
+        rows = _s3_get_jsonl(key)
+        out_rows: list[dict] = []
+        for row in rows:
+            if row.get("expected_label") not in {"HIGH", "LOW"}:
+                invalid_rows.append(
+                    {
+                        "run_id": run_id,
+                        "phase": "experiment_a",
+                        "record_id": str(row.get("source_record_id", "unknown")),
+                        "model": str(row.get("generator_model", "unknown")),
+                        "reason": "expected_label must be HIGH or LOW",
+                        "raw_text": json.dumps(row, ensure_ascii=False),
+                    }
+                )
+                continue
+            edited = {
+                **row,
+                "info_plus": f"{row['target']}の詳細情報を追加した文",
+                "info_minus": f"{row['target']}の要点だけを残した文",
+            }
+            out_rows.append(edited)
+            edited_rows.append(edited)
+        out_key = key.replace("/manifests/experiment_a_edit/", "/normalized/experiment_a_edit/")
+        _s3_put_jsonl(out_key, out_rows)
+
+    count = _write_prediction_manifests(
         run_id,
-        phase=phase,
-        state="RUNNING",
-        completed=cursor + 1,
-        retry_count=int(state.get("retry_count", 0)),
-        trace_id=trace_id,
-        step=phase,
+        "experiment_a_predict",
+        edited_rows,
+        models,
+        shard_size,
+        condition_types=["info_plus", "info_minus"],
+    )
+    _submit_batch_jobs(run_id, "experiment_a_predict")
+    return {
+        "manifest_count": count,
+        "seed_invalid_key": _save_temp_rows(run_id, "experiment_a_seed_invalid", invalid_rows),
+    }
+
+
+def _normalize_experiment_a(
+    run_id: str, seed_invalid_key: str | None
+) -> tuple[list[dict], list[dict]]:
+    _materialize_dryrun_batch_output_for_phase(run_id, "experiment_a_predict")
+    predictions, pred_invalid = _run_prediction_phase(run_id, "experiment_a_predict")
+    for row in predictions:
+        row["phase"] = "experiment_a"
+
+    seed_invalid = _load_temp_rows(seed_invalid_key)
+    all_invalid = seed_invalid + pred_invalid
+    if predictions:
+        _s3_put_jsonl(f"runs/{run_id}/normalized/experiment_a/results.jsonl", predictions)
+    _write_invalid_rows(run_id, "experiment_a", all_invalid)
+    return predictions, all_invalid
+
+
+def _prepare_experiment_d(run_id: str, models: list[str], shard_size: int) -> dict:
+    base_rows: list[dict] = []
+    invalid_rows: list[dict] = []
+    blind_keys = [
+        key
+        for key in _s3_list(f"runs/{run_id}/manifests/experiment_d_blind/")
+        if key.endswith(".jsonl")
+    ]
+    for key in blind_keys:
+        rows = _s3_get_jsonl(key)
+        for row in rows:
+            if row.get("expected_label") not in {"HIGH", "LOW"}:
+                invalid_rows.append(
+                    {
+                        "run_id": run_id,
+                        "phase": "experiment_d",
+                        "record_id": str(row.get("source_record_id", "unknown")),
+                        "model": str(row.get("generator_model", "unknown")),
+                        "reason": "expected_label must be HIGH or LOW",
+                        "raw_text": json.dumps(row, ensure_ascii=False),
+                    }
+                )
+                continue
+            base_rows.append({**row, "condition_type": "blind"})
+
+    wrong_keys = [
+        key
+        for key in _s3_list(f"runs/{run_id}/manifests/experiment_d_wrong_label/")
+        if key.endswith(".jsonl")
+    ]
+    for key in wrong_keys:
+        rows = _s3_get_jsonl(key)
+        for row in rows:
+            if row.get("expected_label") not in {"HIGH", "LOW"}:
+                invalid_rows.append(
+                    {
+                        "run_id": run_id,
+                        "phase": "experiment_d",
+                        "record_id": str(row.get("source_record_id", "unknown")),
+                        "model": str(row.get("generator_model", "unknown")),
+                        "reason": "expected_label must be HIGH or LOW",
+                        "raw_text": json.dumps(row, ensure_ascii=False),
+                    }
+                )
+                continue
+            base_rows.append({**row, "condition_type": "wrong_label"})
+
+    count = _write_prediction_manifests(
+        run_id,
+        "experiment_d_predict",
+        base_rows,
+        models,
+        shard_size,
+    )
+    _submit_batch_jobs(run_id, "experiment_d_predict")
+    return {
+        "manifest_count": count,
+        "seed_invalid_key": _save_temp_rows(run_id, "experiment_d_seed_invalid", invalid_rows),
+    }
+
+
+def _normalize_experiment_d(
+    run_id: str, seed_invalid_key: str | None
+) -> tuple[list[dict], list[dict]]:
+    _materialize_dryrun_batch_output_for_phase(run_id, "experiment_d_predict")
+    results, pred_invalid = _run_prediction_phase(run_id, "experiment_d_predict")
+    for row in results:
+        row["phase"] = "experiment_d"
+
+    seed_invalid = _load_temp_rows(seed_invalid_key)
+    all_invalid = seed_invalid + pred_invalid
+    if results:
+        _s3_put_jsonl(f"runs/{run_id}/normalized/experiment_d/results.jsonl", results)
+    _write_invalid_rows(run_id, "experiment_d", all_invalid)
+    return results, all_invalid
+
+
+def _materialize_and_normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
+    _materialize_dryrun_batch_output_for_phase(run_id, "study1")
+    return _normalize_study1(run_id)
+
+
+def _materialize_and_run_prediction_phase(
+    run_id: str, phase_key: str
+) -> tuple[list[dict], list[dict]]:
+    _materialize_dryrun_batch_output_for_phase(run_id, phase_key)
+    return _run_prediction_phase(run_id, phase_key)
+
+
+def _write_reports_and_index(
+    run_id: str, phase_counts: dict, invalid_counts: dict[str, int]
+) -> str:
+    _write_reports(run_id, phase_counts, invalid_counts)
+    return _write_artifact_index(run_id)
+
+
+def _report_invalid_counts(workflow_state: dict) -> dict[str, int]:
+    invalid = workflow_state.get("invalid_counts", {})
+    return {
+        "study1": int(invalid.get("study1", 0)),
+        "study2": int(invalid.get("study2_within", 0)) + int(invalid.get("study2_across", 0)),
+        "experiment_a": int(invalid.get("experiment_a", 0)),
+        "experiment_d": int(invalid.get("experiment_d", 0)),
+    }
+
+
+class WorkflowDeferred(Exception):
+    def __init__(self, *, phase: str, step: str) -> None:
+        super().__init__(f"{phase}:{step} is still waiting")
+        self.phase = phase
+        self.step = step
+
+
+def _initial_workflow_state() -> dict:
+    return {
+        "phase_counts": {},
+        "invalid_counts": {},
+        "retry_count": 0,
+        "artifact_index_key": None,
+        "experiment_a_seed_invalid_key": None,
+        "experiment_d_seed_invalid_key": None,
+    }
+
+
+def _resolve_context_method(context: DurableContext | None, *names: str):
+    if context is None:
+        return None
+    for name in names:
+        method = getattr(context, name, None)
+        if callable(method):
+            return method
+    return None
+
+
+def _run_durable_step(context: DurableContext | None, step_name: str, func):
+    step_method = _resolve_context_method(context, "step")
+    if step_method is None:
+        return func()
+    return step_method(step_name, func)
+
+
+def _run_child_context(context: DurableContext | None, child_name: str, func):
+    child_method = _resolve_context_method(context, "run_in_child_context", "runInChildContext")
+    if child_method is None:
+        return func(context)
+
+    def _runner(child_context=None):
+        return func(child_context)
+
+    try:
+        return child_method(child_name, _runner)
+    except TypeError:
+        return child_method(_runner)
+
+
+def _wait_decision_stop(output_state: dict | None = None):
+    for name in ("stop_waiting", "done", "complete"):
+        method = getattr(WaitForConditionDecision, name, None)
+        if callable(method):
+            return method(output_state=output_state)
+    return WaitForConditionDecision(done=True, output_state=output_state)
+
+
+def _wait_decision_continue(poll_interval_sec: int, output_state: dict | None = None):
+    duration = Duration.from_seconds(poll_interval_sec)
+    for name in ("continue_waiting", "wait"):
+        method = getattr(WaitForConditionDecision, name, None)
+        if callable(method):
+            return method(duration, output_state=output_state)
+    return WaitForConditionDecision(
+        done=False,
+        next_wait_duration=duration,
+        output_state=output_state,
     )
 
-    if phase == "STUDY1_ENUMERATE":
-        state["phase_counts"]["study1"] = _generate_study1_manifests(run_id, config)
-    elif phase == "STUDY1_BATCH_SUBMIT":
-        _submit_batch_jobs(run_id, "study1")
-    elif phase == "STUDY1_BATCH_POLL":
-        jobs = _load_jobs_from_metadata(run_id, "study1")
-        if not jobs:
-            jobs = _submit_batch_jobs(run_id, "study1")
-        if not _poll_batch_jobs(run_id, "study1", jobs, poll_interval_sec):
-            return state
-        _materialize_dryrun_batch_output_for_phase(run_id, "study1")
-    elif phase == "STUDY1_NORMALIZE":
-        _, invalid_rows = _normalize_study1(run_id)
-        state["invalid_counts"]["study1"] = len(invalid_rows)
-    elif phase == "STUDY2_PREPARE":
-        study1_rows = _load_normalized_rows(run_id, "study1")
-        prepared = _prepare_downstream_manifests(run_id, study1_rows, config)
-        state["phase_counts"].update(prepared)
-    elif phase == "STUDY2_WITHIN":
-        jobs = _load_jobs_from_metadata(run_id, "study2_within")
-        if not jobs:
-            jobs = _submit_batch_jobs(run_id, "study2_within")
-        if not _poll_batch_jobs(run_id, "study2_within", jobs, poll_interval_sec):
-            return state
-        _materialize_dryrun_batch_output_for_phase(run_id, "study2_within")
-        rows, invalid_rows = _run_prediction_phase(run_id, "study2_within")
-        state["phase_counts"]["study2_within"] = len(rows)
-        state["invalid_counts"]["study2_within"] = len(invalid_rows)
-    elif phase == "STUDY2_ACROSS":
-        jobs = _load_jobs_from_metadata(run_id, "study2_across")
-        if not jobs:
-            jobs = _submit_batch_jobs(run_id, "study2_across")
-        if not _poll_batch_jobs(run_id, "study2_across", jobs, poll_interval_sec):
-            return state
-        _materialize_dryrun_batch_output_for_phase(run_id, "study2_across")
-        rows, invalid_rows = _run_prediction_phase(run_id, "study2_across")
-        state["phase_counts"]["study2_across"] = len(rows)
-        state["invalid_counts"]["study2_across"] = len(invalid_rows)
-    elif phase == "EXPERIMENT_A":
-        outcome = _run_experiment_a(run_id, models, shard_size, poll_interval_sec)
-        if outcome is None:
-            return state
-        rows, invalid_rows = outcome
-        state["phase_counts"]["experiment_a"] = len(rows)
-        state["invalid_counts"]["experiment_a"] = len(invalid_rows)
-    elif phase == "EXPERIMENT_D":
-        outcome = _run_experiment_d(run_id, models, shard_size, poll_interval_sec)
-        if outcome is None:
-            return state
-        rows, invalid_rows = outcome
-        state["phase_counts"]["experiment_d"] = len(rows)
-        state["invalid_counts"]["experiment_d"] = len(invalid_rows)
-    elif phase == "REPORT":
-        invalid_counts = {
-            "study1": int(state.get("invalid_counts", {}).get("study1", 0)),
-            "study2": int(state.get("invalid_counts", {}).get("study2_within", 0))
-            + int(state.get("invalid_counts", {}).get("study2_across", 0)),
-            "experiment_a": int(state.get("invalid_counts", {}).get("experiment_a", 0)),
-            "experiment_d": int(state.get("invalid_counts", {}).get("experiment_d", 0)),
-        }
-        _write_reports(run_id, state.get("phase_counts", {}), invalid_counts)
 
-    state["cursor"] = cursor + 1
-    return state
+def _wait_condition_check(state: dict) -> dict:
+    done = _poll_phase_jobs(state["run_id"], state["phase_key"])
+    return {**state, "done": done}
 
 
-def handler(event, _context):
+def _wait_condition_decider(state: dict):
+    if state.get("done"):
+        return _wait_decision_stop(state)
+    return _wait_decision_continue(int(state["poll_interval_sec"]), state)
+
+
+def _durable_wait(context: DurableContext | None, poll_interval_sec: int) -> None:
+    wait_method = _resolve_context_method(context, "wait")
+    if wait_method is None:
+        raise WorkflowDeferred(phase="WAIT", step="WAIT")
+    wait_method(Duration.from_seconds(poll_interval_sec))
+
+
+def _poll_phase_jobs(run_id: str, phase_key: str) -> bool:
+    jobs = _load_jobs_from_metadata(run_id, phase_key)
+    if not jobs:
+        raise PipelineError(
+            step=f"{phase_key.upper()}_WAIT",
+            reason=f"job metadata missing for {phase_key}",
+            retryable=False,
+            category="dependency",
+        )
+    return _poll_batch_jobs(run_id, phase_key, jobs, DEFAULT_POLL_INTERVAL_SEC)
+
+
+def _wait_for_phase_jobs(
+    context: DurableContext | None,
+    *,
+    run_id: str,
+    phase: str,
+    step: str,
+    phase_key: str,
+    poll_interval_sec: int,
+) -> None:
+    wait_for_condition = _resolve_context_method(context, "wait_for_condition", "waitForCondition")
+    if wait_for_condition is not None:
+        try:
+            wait_for_condition(
+                WaitForConditionConfig(
+                    wait_condition_check=_wait_condition_check,
+                    wait_condition_decider=_wait_condition_decider,
+                    initial_state={
+                        "run_id": run_id,
+                        "phase_key": phase_key,
+                        "poll_interval_sec": poll_interval_sec,
+                    },
+                )
+            )
+            return
+        except (AttributeError, NotImplementedError, TypeError):
+            pass
+
+    if context is None:
+        if not _poll_phase_jobs(run_id, phase_key):
+            raise WorkflowDeferred(phase=phase, step=step)
+        return
+
+    attempt = 0
+    while True:
+        attempt += 1
+        done = _run_durable_step(
+            context,
+            f"{step}_CHECK_{attempt:04d}",
+            lambda: _poll_phase_jobs(run_id, phase_key),
+        )
+        if done:
+            return
+        _durable_wait(context, poll_interval_sec)
+
+
+def _mark_step(run_id: str, trace_id: str, phase: str, step: str, retry_count: int) -> None:
+    _log(
+        "info",
+        {
+            "trace_id": trace_id,
+            "run_id": run_id,
+            "phase": phase,
+            "step": step,
+            "message": "step_start",
+        },
+    )
+    projection.mark_running(
+        run_id=run_id,
+        phase=phase,
+        step=step,
+        completed_steps=WORKFLOW_STEP_INDEX[step] - 1,
+        retry_count=retry_count,
+    )
+
+
+def _complete_step(run_id: str, trace_id: str, phase: str, step: str) -> None:
+    _log(
+        "info",
+        {
+            "trace_id": trace_id,
+            "run_id": run_id,
+            "phase": phase,
+            "step": step,
+            "message": "step_done",
+        },
+    )
+
+
+def _execute_workflow_step(
+    context: DurableContext | None,
+    *,
+    run_id: str,
+    trace_id: str,
+    workflow_state: dict,
+    phase: str,
+    step: str,
+    func,
+):
+    _mark_step(run_id, trace_id, phase, step, int(workflow_state.get("retry_count", 0)))
+    result = _run_durable_step(context, step, func)
+    _complete_step(run_id, trace_id, phase, step)
+    return result
+
+
+def _run_study1(context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict):
+    def _child(child_context: DurableContext | None):
+        config = _load_config(run_id)
+        poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
+
+        workflow_state["phase_counts"]["study1"] = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY1",
+            step="STUDY1_ENUMERATE",
+            func=lambda: _generate_study1_manifests(run_id, config),
+        )
+        _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY1",
+            step="STUDY1_SUBMIT",
+            func=lambda: _submit_batch_jobs(run_id, "study1"),
+        )
+        _mark_step(
+            run_id,
+            trace_id,
+            "STUDY1",
+            "STUDY1_WAIT",
+            int(workflow_state.get("retry_count", 0)),
+        )
+        _wait_for_phase_jobs(
+            child_context,
+            run_id=run_id,
+            phase="STUDY1",
+            step="STUDY1_WAIT",
+            phase_key="study1",
+            poll_interval_sec=poll_interval_sec,
+        )
+        _complete_step(run_id, trace_id, "STUDY1", "STUDY1_WAIT")
+        rows, invalid_rows = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY1",
+            step="STUDY1_NORMALIZE",
+            func=lambda: _materialize_and_normalize_study1(run_id),
+        )
+        workflow_state["phase_counts"]["study1"] = len(rows)
+        workflow_state["invalid_counts"]["study1"] = len(invalid_rows)
+
+    return _run_child_context(context, "study1", _child)
+
+
+def _run_study2(context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict):
+    def _child(child_context: DurableContext | None):
+        config = _load_config(run_id)
+        poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
+
+        prepared = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY2",
+            step="STUDY2_PREPARE",
+            func=lambda: _prepare_downstream_manifests(
+                run_id, _load_normalized_rows(run_id, "study1"), config
+            ),
+        )
+        workflow_state["phase_counts"].update(prepared)
+
+        _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY2",
+            step="STUDY2_WITHIN_SUBMIT",
+            func=lambda: _submit_batch_jobs(run_id, "study2_within"),
+        )
+        _mark_step(
+            run_id,
+            trace_id,
+            "STUDY2",
+            "STUDY2_WITHIN_WAIT",
+            int(workflow_state.get("retry_count", 0)),
+        )
+        _wait_for_phase_jobs(
+            child_context,
+            run_id=run_id,
+            phase="STUDY2",
+            step="STUDY2_WITHIN_WAIT",
+            phase_key="study2_within",
+            poll_interval_sec=poll_interval_sec,
+        )
+        _complete_step(run_id, trace_id, "STUDY2", "STUDY2_WITHIN_WAIT")
+        rows, invalid_rows = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY2",
+            step="STUDY2_WITHIN_NORMALIZE",
+            func=lambda: _materialize_and_run_prediction_phase(run_id, "study2_within"),
+        )
+        workflow_state["phase_counts"]["study2_within"] = len(rows)
+        workflow_state["invalid_counts"]["study2_within"] = len(invalid_rows)
+
+        _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY2",
+            step="STUDY2_ACROSS_SUBMIT",
+            func=lambda: _submit_batch_jobs(run_id, "study2_across"),
+        )
+        _mark_step(
+            run_id,
+            trace_id,
+            "STUDY2",
+            "STUDY2_ACROSS_WAIT",
+            int(workflow_state.get("retry_count", 0)),
+        )
+        _wait_for_phase_jobs(
+            child_context,
+            run_id=run_id,
+            phase="STUDY2",
+            step="STUDY2_ACROSS_WAIT",
+            phase_key="study2_across",
+            poll_interval_sec=poll_interval_sec,
+        )
+        _complete_step(run_id, trace_id, "STUDY2", "STUDY2_ACROSS_WAIT")
+        rows, invalid_rows = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY2",
+            step="STUDY2_ACROSS_NORMALIZE",
+            func=lambda: _materialize_and_run_prediction_phase(run_id, "study2_across"),
+        )
+        workflow_state["phase_counts"]["study2_across"] = len(rows)
+        workflow_state["invalid_counts"]["study2_across"] = len(invalid_rows)
+
+    return _run_child_context(context, "study2", _child)
+
+
+def _run_experiment_a_workflow(
+    context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict
+):
+    def _child(child_context: DurableContext | None):
+        config = _load_config(run_id)
+        poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
+        models = list(config.get("models", []))
+        shard_size = int(config.get("shard_size", 500))
+
+        prepared = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="EXPERIMENT_A",
+            step="EXPERIMENT_A_SUBMIT",
+            func=lambda: _prepare_experiment_a(run_id, models, shard_size),
+        )
+        workflow_state["phase_counts"]["experiment_a_predict"] = int(prepared["manifest_count"])
+        workflow_state["experiment_a_seed_invalid_key"] = prepared["seed_invalid_key"]
+
+        _mark_step(
+            run_id,
+            trace_id,
+            "EXPERIMENT_A",
+            "EXPERIMENT_A_WAIT",
+            int(workflow_state.get("retry_count", 0)),
+        )
+        _wait_for_phase_jobs(
+            child_context,
+            run_id=run_id,
+            phase="EXPERIMENT_A",
+            step="EXPERIMENT_A_WAIT",
+            phase_key="experiment_a_predict",
+            poll_interval_sec=poll_interval_sec,
+        )
+        _complete_step(run_id, trace_id, "EXPERIMENT_A", "EXPERIMENT_A_WAIT")
+
+        rows, invalid_rows = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="EXPERIMENT_A",
+            step="EXPERIMENT_A_NORMALIZE",
+            func=lambda: _normalize_experiment_a(
+                run_id, workflow_state.get("experiment_a_seed_invalid_key")
+            ),
+        )
+        workflow_state["phase_counts"]["experiment_a"] = len(rows)
+        workflow_state["invalid_counts"]["experiment_a"] = len(invalid_rows)
+
+    return _run_child_context(context, "experiment_a", _child)
+
+
+def _run_experiment_d_workflow(
+    context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict
+):
+    def _child(child_context: DurableContext | None):
+        config = _load_config(run_id)
+        poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
+        models = list(config.get("models", []))
+        shard_size = int(config.get("shard_size", 500))
+
+        prepared = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="EXPERIMENT_D",
+            step="EXPERIMENT_D_SUBMIT",
+            func=lambda: _prepare_experiment_d(run_id, models, shard_size),
+        )
+        workflow_state["phase_counts"]["experiment_d_predict"] = int(prepared["manifest_count"])
+        workflow_state["experiment_d_seed_invalid_key"] = prepared["seed_invalid_key"]
+
+        _mark_step(
+            run_id,
+            trace_id,
+            "EXPERIMENT_D",
+            "EXPERIMENT_D_WAIT",
+            int(workflow_state.get("retry_count", 0)),
+        )
+        _wait_for_phase_jobs(
+            child_context,
+            run_id=run_id,
+            phase="EXPERIMENT_D",
+            step="EXPERIMENT_D_WAIT",
+            phase_key="experiment_d_predict",
+            poll_interval_sec=poll_interval_sec,
+        )
+        _complete_step(run_id, trace_id, "EXPERIMENT_D", "EXPERIMENT_D_WAIT")
+
+        rows, invalid_rows = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="EXPERIMENT_D",
+            step="EXPERIMENT_D_NORMALIZE",
+            func=lambda: _normalize_experiment_d(
+                run_id, workflow_state.get("experiment_d_seed_invalid_key")
+            ),
+        )
+        workflow_state["phase_counts"]["experiment_d"] = len(rows)
+        workflow_state["invalid_counts"]["experiment_d"] = len(invalid_rows)
+
+    return _run_child_context(context, "experiment_d", _child)
+
+
+def _run_report(context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict):
+    invalid_counts = _report_invalid_counts(workflow_state)
+    workflow_state["artifact_index_key"] = _execute_workflow_step(
+        context,
+        run_id=run_id,
+        trace_id=trace_id,
+        workflow_state=workflow_state,
+        phase="REPORT",
+        step="REPORT_GENERATE",
+        func=lambda: _write_reports_and_index(
+            run_id,
+            workflow_state["phase_counts"],
+            invalid_counts,
+        ),
+    )
+
+
+@durable_execution
+def handler(event, context: DurableContext | None):
     run_id = event.get("run_id")
     trace_id = str(event.get("trace_id") or uuid.uuid4())
     if not is_valid_run_id(run_id):
@@ -1645,76 +2127,57 @@ def handler(event, _context):
             "trace_id": trace_id,
         }
 
-    owner = str(uuid.uuid4())
-    if not _acquire_lease(run_id, owner):
-        _log("info", {"trace_id": trace_id, "run_id": run_id, "step": "LEASE", "message": "busy"})
-        return {"ok": True, "run_id": run_id, "deferred": True}
+    workflow_state = _initial_workflow_state()
 
     try:
-        state = _load_state(run_id)
-        for _ in range(MAX_PHASES_PER_INVOCATION):
-            cursor = int(state.get("cursor", 0))
-            if cursor >= len(PHASES):
-                break
+        _run_study1(context, run_id, trace_id, workflow_state)
+        _run_study2(context, run_id, trace_id, workflow_state)
+        _run_experiment_a_workflow(context, run_id, trace_id, workflow_state)
+        _run_experiment_d_workflow(context, run_id, trace_id, workflow_state)
+        _run_report(context, run_id, trace_id, workflow_state)
 
-            phase = PHASES[cursor]
-            _log(
-                "info",
-                {
-                    "trace_id": trace_id,
-                    "run_id": run_id,
-                    "phase": phase,
-                    "step": "PHASE_START",
-                    "cursor": cursor,
-                },
-            )
-            state = _execute_phase(run_id, state, trace_id)
-            _save_state(run_id, state)
-            _log(
-                "info",
-                {
-                    "trace_id": trace_id,
-                    "run_id": run_id,
-                    "phase": phase,
-                    "step": "PHASE_DONE",
-                    "cursor": state.get("cursor"),
-                },
-            )
-
-            if int(state.get("cursor", 0)) < len(PHASES):
-                _invoke_self(run_id, trace_id)
-                if MAX_PHASES_PER_INVOCATION == 1:
-                    return {"ok": True, "run_id": run_id, "deferred": True}
-
-        retry_count = int(state.get("retry_count", 0))
-        if int(state.get("cursor", 0)) >= len(PHASES):
-            invalid_total = sum(int(v) for v in state.get("invalid_counts", {}).values())
-            if invalid_total > 0:
-                _finalize(run_id, "PARTIAL", retry_count, trace_id)
-                _emit_finalize_metrics(run_id, "PARTIAL", state)
-                return {"ok": True, "run_id": run_id, "state": "PARTIAL"}
-            _finalize(run_id, "SUCCEEDED", retry_count, trace_id)
-            _emit_finalize_metrics(run_id, "SUCCEEDED", state)
-            return {"ok": True, "run_id": run_id, "state": "SUCCEEDED"}
-        return {"ok": True, "run_id": run_id, "deferred": True}
+        final_state = (
+            "PARTIAL"
+            if sum(int(v) for v in workflow_state.get("invalid_counts", {}).values()) > 0
+            else "SUCCEEDED"
+        )
+        projection.finalize(
+            run_id=run_id,
+            state=final_state,
+            phase="REPORT",
+            step="FINALIZE",
+            retry_count=int(workflow_state.get("retry_count", 0)),
+            artifact_index_key=workflow_state.get("artifact_index_key"),
+        )
+        _emit_finalize_metrics(run_id, final_state, workflow_state)
+        return {"ok": True, "run_id": run_id, "state": final_state}
+    except WorkflowDeferred as deferred:
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "state": "RUNNING",
+            "phase": deferred.phase,
+            "step": deferred.step,
+            "deferred": True,
+        }
     except PipelineError as exc:
-        state = _load_state(run_id)
-        retry_count = int(state.get("retry_count", 0)) + 1
-        state["retry_count"] = retry_count
-        _save_state(run_id, state)
-        _finalize(
-            run_id,
-            "FAILED",
-            retry_count,
-            trace_id,
+        workflow_state["retry_count"] = int(workflow_state.get("retry_count", 0)) + 1
+        projection.finalize(
+            run_id=run_id,
+            state="FAILED",
+            phase="REPORT",
+            step="FINALIZE",
+            retry_count=int(workflow_state["retry_count"]),
             last_error={
                 "step": exc.step,
                 "reason": exc.reason,
                 "retryable": exc.retryable,
                 "category": exc.category,
+                "trace_id": trace_id,
             },
+            artifact_index_key=workflow_state.get("artifact_index_key"),
         )
-        _emit_finalize_metrics(run_id, "FAILED", state)
+        _emit_finalize_metrics(run_id, "FAILED", workflow_state)
         _log(
             "error",
             {
@@ -1734,23 +2197,23 @@ def handler(event, _context):
             "trace_id": trace_id,
         }
     except Exception as exc:  # noqa: BLE001
-        state = _load_state(run_id)
-        retry_count = int(state.get("retry_count", 0)) + 1
-        state["retry_count"] = retry_count
-        _save_state(run_id, state)
-        _finalize(
-            run_id,
-            "FAILED",
-            retry_count,
-            trace_id,
+        workflow_state["retry_count"] = int(workflow_state.get("retry_count", 0)) + 1
+        projection.finalize(
+            run_id=run_id,
+            state="FAILED",
+            phase="REPORT",
+            step="FINALIZE",
+            retry_count=int(workflow_state["retry_count"]),
             last_error={
-                "step": PHASES[min(int(state.get("cursor", 0)), len(PHASES) - 1)],
+                "step": "UNHANDLED",
                 "reason": str(exc),
                 "retryable": False,
                 "category": "internal",
+                "trace_id": trace_id,
             },
+            artifact_index_key=workflow_state.get("artifact_index_key"),
         )
-        _emit_finalize_metrics(run_id, "FAILED", state)
+        _emit_finalize_metrics(run_id, "FAILED", workflow_state)
         _log(
             "error",
             {
@@ -1768,5 +2231,3 @@ def handler(event, _context):
             "category": "internal",
             "trace_id": trace_id,
         }
-    finally:
-        _release_lease(run_id, owner)
