@@ -1,6 +1,7 @@
 import csv
 import datetime
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -1673,11 +1674,33 @@ def _resolve_context_method(context: DurableContext | None, *names: str):
     return None
 
 
+def _call_named_context_callable(method, name: str, func, *, default_order: str = "func_first"):
+    try:
+        params = tuple(inspect.signature(method).parameters)
+    except (TypeError, ValueError):
+        params = ()
+
+    if len(params) == 1:
+        return method(func)
+
+    if len(params) >= 2:
+        first = params[0].lower()
+        second = params[1].lower()
+        if "name" in first and "name" not in second:
+            return method(name, func)
+        if "name" in second and "name" not in first:
+            return method(func, name)
+
+    if default_order == "name_first":
+        return method(name, func)
+    return method(func, name)
+
+
 def _run_durable_step(context: DurableContext | None, step_name: str, func):
     step_method = _resolve_context_method(context, "step")
     if step_method is None:
         return func()
-    return step_method(step_name, func)
+    return _call_named_context_callable(step_method, step_name, func)
 
 
 def _run_child_context(context: DurableContext | None, child_name: str, func):
@@ -1688,14 +1711,7 @@ def _run_child_context(context: DurableContext | None, child_name: str, func):
     def _runner(child_context=None):
         return func(child_context)
 
-    try:
-        # Prefer the AWS SDK sample signature: (func, name).
-        return child_method(_runner, child_name)
-    except TypeError:
-        try:
-            return child_method(child_name, _runner)
-        except TypeError:
-            return child_method(_runner)
+    return _call_named_context_callable(child_method, child_name, _runner)
 
 
 def _wait_decision_stop(output_state: dict | None = None):

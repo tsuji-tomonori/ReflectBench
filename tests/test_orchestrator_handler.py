@@ -20,7 +20,7 @@ class FakeDurableContext:
         self.child_contexts = []
         self.wait_configs = []
 
-    def step(self, name, func):
+    def step(self, func, name):
         self.steps.append(name)
         return func()
 
@@ -143,6 +143,23 @@ def test_run_child_context_falls_back_to_legacy_signature(mod):
 
     assert result is context
     assert context.child_contexts[-1] == "study1"
+
+
+def test_run_durable_step_supports_legacy_name_first_signature(mod):
+    class LegacyContext:
+        def __init__(self):
+            self.steps = []
+
+        def step(self, name, func):
+            self.steps.append(name)
+            return func()
+
+    context = LegacyContext()
+
+    result = mod._run_durable_step(context, "STUDY1_ENUMERATE", lambda: 7)
+
+    assert result == 7
+    assert context.steps == ["STUDY1_ENUMERATE"]
 
 
 def test_handler_finalizes_partial_when_invalid_exists(mod):
