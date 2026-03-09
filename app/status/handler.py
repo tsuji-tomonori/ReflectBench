@@ -12,6 +12,7 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.client("dynamodb")
 lambda_client = boto3.client("lambda")
 TABLE_NAME = os.environ["TABLE_NAME"]
+TERMINAL_STATES = {"SUCCEEDED", "FAILED", "PARTIAL"}
 
 
 def _n(item: dict, key: str, default: int = 0) -> int:
@@ -53,7 +54,9 @@ def _enrich_from_durable_execution(item: dict, body: dict) -> None:
     }
 
     durable_status = durable.get("Status")
-    if durable_status in {"RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT"}:
+    if durable_status in {"RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT"} and body.get(
+        "state"
+    ) not in TERMINAL_STATES:
         body["state"] = durable_status
 
 

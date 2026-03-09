@@ -162,6 +162,23 @@ def test_run_durable_step_supports_legacy_name_first_signature(mod):
     assert context.steps == ["STUDY1_ENUMERATE"]
 
 
+def test_run_durable_step_ignores_sdk_step_context_for_zero_arg_callable(mod):
+    class SdkStyleContext:
+        def __init__(self):
+            self.steps = []
+
+        def step(self, func, name):
+            self.steps.append(name)
+            return func({"attempt": 1})
+
+    context = SdkStyleContext()
+
+    result = mod._run_durable_step(context, "STUDY1_ENUMERATE", lambda: 7)
+
+    assert result == 7
+    assert context.steps == ["STUDY1_ENUMERATE"]
+
+
 def test_handler_finalizes_partial_when_invalid_exists(mod):
     def seed_invalid(*_args, **_kwargs):
         pass

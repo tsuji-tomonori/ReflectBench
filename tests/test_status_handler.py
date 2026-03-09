@@ -136,3 +136,36 @@ def test_enriches_status_from_durable_execution(mod):
     assert body["state"] == "SUCCEEDED"
     assert body["durable_execution"]["name"] == "run-2"
     assert body["durable_execution"]["version"] == "3"
+
+
+def test_terminal_dynamodb_state_is_not_overridden_by_durable_status(mod):
+    item = {
+        "durable_execution_arn": {
+            "S": (
+                "arn:aws:lambda:ap-southeast-2:123:durable-execution/"
+                "orchestrator_durable_fn/live/run-3"
+            )
+        },
+        "execution_name": {"S": "run-3"},
+    }
+    body = {"run_id": "123e4567-e89b-42d3-a456-426614174003", "state": "FAILED"}
+
+    with patch.object(
+        mod.lambda_client,
+        "get_durable_execution",
+        create=True,
+        return_value={
+            "DurableExecutionArn": item["durable_execution_arn"]["S"],
+            "DurableExecutionName": "run-3",
+            "Status": "SUCCEEDED",
+            "FunctionArn": (
+                "arn:aws:lambda:ap-southeast-2:123:function:"
+                "orchestrator_durable_fn:live"
+            ),
+            "Version": "3",
+        },
+    ):
+        mod._enrich_from_durable_execution(item, body)
+
+    assert body["state"] == "FAILED"
+    assert body["durable_execution"]["status"] == "SUCCEEDED"

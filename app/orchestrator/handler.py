@@ -366,6 +366,24 @@ def _batch_input_key_for_manifest(manifest_key: str, phase: str) -> str:
     return manifest_key.replace(f"/manifests/{phase}/", f"/batch-input/{phase}/")
 
 
+def _batch_job_name(phase: str, manifest_key: str, attempt: int) -> str:
+    phase_key = phase.replace("_", "-")
+    return f"rb-{phase_key}-{_sha256(f'{manifest_key}|{attempt}')[:24]}"
+
+
+def _is_batch_output_data_key(key: str) -> bool:
+    if key.endswith("-job.json"):
+        return False
+    return key.endswith(".jsonl") or key.endswith(".jsonl.out")
+
+
+def _normalized_key_for_output_key(output_key: str, phase: str) -> str:
+    key = output_key.replace(f"/batch-output/{phase}/", f"/normalized/{phase}/")
+    if key.endswith(".out"):
+        return key[:-4]
+    return key
+
+
 def _request_row_id(phase: str, row: dict) -> str:
     if phase == "study1":
         return str(row["record_id"])
@@ -491,7 +509,7 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
         attempts = 0
         while attempts < 2:
             attempts += 1
-            job_name = f"rb-{phase}-{_sha256(f'{key}|{attempts}')[:24]}"
+            job_name = _batch_job_name(phase, key, attempts)
             try:
                 response = bedrock.create_model_invocation_job(
                     jobName=job_name,
@@ -542,6 +560,13 @@ def _load_jobs_from_metadata(run_id: str, phase: str) -> dict[str, str]:
         if manifest_key and job_identifier:
             jobs[manifest_key] = job_identifier
     return jobs
+
+
+def _phase_has_manifests(run_id: str, phase: str) -> bool:
+    manifest_keys = [
+        key for key in _s3_list(f"runs/{run_id}/manifests/{phase}/") if key.endswith(".jsonl")
+    ]
+    return bool(manifest_keys)
 
 
 def _poll_batch_jobs(
@@ -754,9 +779,7 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
     invalid_rows: list[dict] = []
     manifest_index = _load_manifest_index(run_id, "study1")
     output_keys = [
-        key
-        for key in _s3_list(f"runs/{run_id}/batch-output/study1/")
-        if key.endswith(".jsonl") and not key.endswith("-job.json")
+        key for key in _s3_list(f"runs/{run_id}/batch-output/study1/") if _is_batch_output_data_key(key)
     ]
 
     for key in output_keys:
@@ -864,7 +887,7 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
             out_rows.append(rec)
             normalized.append(rec)
 
-        out_key = key.replace("/batch-output/study1/", "/normalized/study1/")
+        out_key = _normalized_key_for_output_key(key, "study1")
         _s3_put_jsonl(out_key, out_rows)
 
     _write_invalid_rows(run_id, "study1", invalid_rows)
@@ -1016,7 +1039,7 @@ def _run_prediction_phase(run_id: str, phase: str) -> tuple[list[dict], list[dic
     output_keys = [
         key
         for key in _s3_list(f"runs/{run_id}/batch-output/{phase}/")
-        if key.endswith(".jsonl") and not key.endswith("-job.json")
+        if _is_batch_output_data_key(key)
     ]
     manifest_index = _load_manifest_index(run_id, phase)
 
@@ -1130,7 +1153,7 @@ def _run_prediction_phase(run_id: str, phase: str) -> tuple[list[dict], list[dic
             normalized_rows.append(result)
             output_rows.append(result)
 
-        out_key = key.replace(f"/batch-output/{phase}/", f"/normalized/{phase}/")
+        out_key = _normalized_key_for_output_key(key, phase)
         _s3_put_jsonl(out_key, normalized_rows)
 
     _write_invalid_rows(run_id, phase, invalid_rows)
@@ -1636,6 +1659,14 @@ def _write_reports_and_index(
     return _write_artifact_index(run_id)
 
 
+def _row_result_counts(result: tuple[list[dict], list[dict]]) -> dict[str, int]:
+    rows, invalid_rows = result
+    return {
+        "row_count": len(rows),
+        "invalid_count": len(invalid_rows),
+    }
+
+
 def _report_invalid_counts(workflow_state: dict) -> dict[str, int]:
     invalid = workflow_state.get("invalid_counts", {})
     return {
@@ -1696,11 +1727,32 @@ def _call_named_context_callable(method, name: str, func, *, default_order: str 
     return method(func, name)
 
 
+def _adapt_step_callable(func):
+    try:
+        params = tuple(inspect.signature(func).parameters.values())
+    except (TypeError, ValueError):
+        params = ()
+
+    for param in params:
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            return func
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            return func
+
+    def _runner(_step_context=None):
+        return func()
+
+    return _runner
+
+
 def _run_durable_step(context: DurableContext | None, step_name: str, func):
     step_method = _resolve_context_method(context, "step")
     if step_method is None:
         return func()
-    return _call_named_context_callable(step_method, step_name, func)
+    return _call_named_context_callable(step_method, step_name, _adapt_step_callable(func))
 
 
 def _run_child_context(context: DurableContext | None, child_name: str, func):
@@ -1756,6 +1808,8 @@ def _durable_wait(context: DurableContext | None, poll_interval_sec: int) -> Non
 def _poll_phase_jobs(run_id: str, phase_key: str) -> bool:
     jobs = _load_jobs_from_metadata(run_id, phase_key)
     if not jobs:
+        if not _phase_has_manifests(run_id, phase_key):
+            return True
         raise PipelineError(
             step=f"{phase_key.upper()}_WAIT",
             reason=f"job metadata missing for {phase_key}",
@@ -1898,17 +1952,17 @@ def _run_study1(context: DurableContext | None, run_id: str, trace_id: str, work
             poll_interval_sec=poll_interval_sec,
         )
         _complete_step(run_id, trace_id, "STUDY1", "STUDY1_WAIT")
-        rows, invalid_rows = _execute_workflow_step(
+        counts = _execute_workflow_step(
             child_context,
             run_id=run_id,
             trace_id=trace_id,
             workflow_state=workflow_state,
             phase="STUDY1",
             step="STUDY1_NORMALIZE",
-            func=lambda: _materialize_and_normalize_study1(run_id),
+            func=lambda: _row_result_counts(_materialize_and_normalize_study1(run_id)),
         )
-        workflow_state["phase_counts"]["study1"] = len(rows)
-        workflow_state["invalid_counts"]["study1"] = len(invalid_rows)
+        workflow_state["phase_counts"]["study1"] = int(counts["row_count"])
+        workflow_state["invalid_counts"]["study1"] = int(counts["invalid_count"])
 
     return _run_child_context(context, "study1", _child)
 
@@ -1956,17 +2010,19 @@ def _run_study2(context: DurableContext | None, run_id: str, trace_id: str, work
             poll_interval_sec=poll_interval_sec,
         )
         _complete_step(run_id, trace_id, "STUDY2", "STUDY2_WITHIN_WAIT")
-        rows, invalid_rows = _execute_workflow_step(
+        counts = _execute_workflow_step(
             child_context,
             run_id=run_id,
             trace_id=trace_id,
             workflow_state=workflow_state,
             phase="STUDY2",
             step="STUDY2_WITHIN_NORMALIZE",
-            func=lambda: _materialize_and_run_prediction_phase(run_id, "study2_within"),
+            func=lambda: _row_result_counts(
+                _materialize_and_run_prediction_phase(run_id, "study2_within")
+            ),
         )
-        workflow_state["phase_counts"]["study2_within"] = len(rows)
-        workflow_state["invalid_counts"]["study2_within"] = len(invalid_rows)
+        workflow_state["phase_counts"]["study2_within"] = int(counts["row_count"])
+        workflow_state["invalid_counts"]["study2_within"] = int(counts["invalid_count"])
 
         _execute_workflow_step(
             child_context,
@@ -1993,17 +2049,19 @@ def _run_study2(context: DurableContext | None, run_id: str, trace_id: str, work
             poll_interval_sec=poll_interval_sec,
         )
         _complete_step(run_id, trace_id, "STUDY2", "STUDY2_ACROSS_WAIT")
-        rows, invalid_rows = _execute_workflow_step(
+        counts = _execute_workflow_step(
             child_context,
             run_id=run_id,
             trace_id=trace_id,
             workflow_state=workflow_state,
             phase="STUDY2",
             step="STUDY2_ACROSS_NORMALIZE",
-            func=lambda: _materialize_and_run_prediction_phase(run_id, "study2_across"),
+            func=lambda: _row_result_counts(
+                _materialize_and_run_prediction_phase(run_id, "study2_across")
+            ),
         )
-        workflow_state["phase_counts"]["study2_across"] = len(rows)
-        workflow_state["invalid_counts"]["study2_across"] = len(invalid_rows)
+        workflow_state["phase_counts"]["study2_across"] = int(counts["row_count"])
+        workflow_state["invalid_counts"]["study2_across"] = int(counts["invalid_count"])
 
     return _run_child_context(context, "study2", _child)
 
@@ -2046,19 +2104,19 @@ def _run_experiment_a_workflow(
         )
         _complete_step(run_id, trace_id, "EXPERIMENT_A", "EXPERIMENT_A_WAIT")
 
-        rows, invalid_rows = _execute_workflow_step(
+        counts = _execute_workflow_step(
             child_context,
             run_id=run_id,
             trace_id=trace_id,
             workflow_state=workflow_state,
             phase="EXPERIMENT_A",
             step="EXPERIMENT_A_NORMALIZE",
-            func=lambda: _normalize_experiment_a(
-                run_id, workflow_state.get("experiment_a_seed_invalid_key")
+            func=lambda: _row_result_counts(
+                _normalize_experiment_a(run_id, workflow_state.get("experiment_a_seed_invalid_key"))
             ),
         )
-        workflow_state["phase_counts"]["experiment_a"] = len(rows)
-        workflow_state["invalid_counts"]["experiment_a"] = len(invalid_rows)
+        workflow_state["phase_counts"]["experiment_a"] = int(counts["row_count"])
+        workflow_state["invalid_counts"]["experiment_a"] = int(counts["invalid_count"])
 
     return _run_child_context(context, "experiment_a", _child)
 
@@ -2101,19 +2159,19 @@ def _run_experiment_d_workflow(
         )
         _complete_step(run_id, trace_id, "EXPERIMENT_D", "EXPERIMENT_D_WAIT")
 
-        rows, invalid_rows = _execute_workflow_step(
+        counts = _execute_workflow_step(
             child_context,
             run_id=run_id,
             trace_id=trace_id,
             workflow_state=workflow_state,
             phase="EXPERIMENT_D",
             step="EXPERIMENT_D_NORMALIZE",
-            func=lambda: _normalize_experiment_d(
-                run_id, workflow_state.get("experiment_d_seed_invalid_key")
+            func=lambda: _row_result_counts(
+                _normalize_experiment_d(run_id, workflow_state.get("experiment_d_seed_invalid_key"))
             ),
         )
-        workflow_state["phase_counts"]["experiment_d"] = len(rows)
-        workflow_state["invalid_counts"]["experiment_d"] = len(invalid_rows)
+        workflow_state["phase_counts"]["experiment_d"] = int(counts["row_count"])
+        workflow_state["invalid_counts"]["experiment_d"] = int(counts["invalid_count"])
 
     return _run_child_context(context, "experiment_d", _child)
 
