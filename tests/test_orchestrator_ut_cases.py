@@ -98,6 +98,57 @@ def test_normalize_study1_reads_bedrock_jsonl_out(mod):
     write_invalid.assert_called_once_with(run_id, "study1", [])
 
 
+def test_normalize_study1_reads_openai_compatible_choices_wrapper(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174020"
+    manifest_key = f"runs/{run_id}/manifests/study1/model-a/part-00001.jsonl"
+    output_key = f"runs/{run_id}/batch-output/study1/model-a/job-1/part-00001.jsonl.out"
+    record_id = "rec-choices-1"
+    manifest_row = {
+        "record_id": record_id,
+        "run_id": run_id,
+        "phase": "study1",
+        "model_id": "model-a",
+        "temperature": 0.2,
+        "prompt_type": "NORMAL",
+        "target": "x",
+        "loop_index": 0,
+    }
+    wrapped_output = {
+        "recordId": record_id,
+        "modelOutput": {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "```json\n"
+                            '{"generated_sentence":"s","reasoning":"r","judgment":"LOW"}\n'
+                            "```"
+                        )
+                    }
+                }
+            ]
+        },
+    }
+
+    with (
+        patch.object(mod, "_s3_list") as s3_list,
+        patch.object(mod, "_s3_get_jsonl") as s3_get_jsonl,
+        patch.object(mod, "_s3_put_jsonl") as s3_put_jsonl,
+        patch.object(mod, "_write_invalid_rows") as write_invalid,
+    ):
+        s3_list.side_effect = [[manifest_key], [output_key]]
+        s3_get_jsonl.side_effect = [[manifest_row], [wrapped_output]]
+
+        rows, invalid_rows = mod._normalize_study1(run_id)
+
+    assert len(rows) == 1
+    assert rows[0]["record_id"] == record_id
+    assert rows[0]["judgment"] == "LOW"
+    assert invalid_rows == []
+    s3_put_jsonl.assert_called_once()
+    write_invalid.assert_called_once_with(run_id, "study1", [])
+
+
 def test_prediction_phase_writes_invalid_rows(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174001"
     output_key = f"runs/{run_id}/batch-output/study2_within/part-00001.jsonl"
@@ -170,6 +221,59 @@ def test_prediction_phase_reads_bedrock_jsonl_out(mod):
     assert invalid_rows == []
     s3_put_jsonl.assert_called_once()
     assert s3_put_jsonl.call_args.args[0].endswith("/normalized/study2_within/job-1/part-00001.jsonl")
+    write_invalid.assert_called_once_with(run_id, "study2_within", [])
+
+
+def test_prediction_phase_reads_openai_compatible_choices_wrapper(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174021"
+    manifest_key = f"runs/{run_id}/manifests/study2_within/part-00001.jsonl"
+    output_key = f"runs/{run_id}/batch-output/study2_within/job-1/part-00001.jsonl.out"
+    request_id = mod._request_row_id(
+        "study2_within",
+        {
+            "source_record_id": "src-1",
+            "generator_model": "g1",
+            "predictor_model": "p1",
+            "expected_label": "LOW",
+            "condition_type": "within",
+        },
+    )
+    wrapped_output = {
+        "recordId": request_id,
+        "modelOutput": {
+            "choices": [
+                {
+                    "message": {
+                        "content": '```json\n{"predicted_label":"LOW"}\n```',
+                    }
+                }
+            ]
+        },
+    }
+    manifest_row = {
+        "source_record_id": "src-1",
+        "generator_model": "g1",
+        "predictor_model": "p1",
+        "expected_label": "LOW",
+        "condition_type": "within",
+    }
+
+    with (
+        patch.object(mod, "_s3_list") as s3_list,
+        patch.object(mod, "_s3_get_jsonl") as s3_get_jsonl,
+        patch.object(mod, "_s3_put_jsonl") as s3_put_jsonl,
+        patch.object(mod, "_write_invalid_rows") as write_invalid,
+    ):
+        s3_list.side_effect = [[output_key], [manifest_key]]
+        s3_get_jsonl.side_effect = [[manifest_row], [wrapped_output]]
+
+        rows, invalid_rows = mod._run_prediction_phase(run_id, "study2_within")
+
+    assert len(rows) == 1
+    assert rows[0]["source_record_id"] == "src-1"
+    assert rows[0]["predicted_label"] == "LOW"
+    assert invalid_rows == []
+    s3_put_jsonl.assert_called_once()
     write_invalid.assert_called_once_with(run_id, "study2_within", [])
 
 

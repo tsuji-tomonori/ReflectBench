@@ -699,7 +699,7 @@ def _extract_text_from_model_output(payload: object) -> str | None:
     if isinstance(text_value, str) and text_value.strip():
         return text_value.strip()
 
-    for key in ("content", "message", "output", "modelOutput", "response", "body"):
+    for key in ("content", "message", "output", "modelOutput", "response", "body", "choices"):
         value = payload.get(key)
         if isinstance(value, list):
             for item in value:
