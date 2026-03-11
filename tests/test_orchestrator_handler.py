@@ -122,10 +122,76 @@ def test_handler_uses_child_context_and_wait_for_condition(mod):
     assert res["ok"] is True
     assert res["state"] == "SUCCEEDED"
     assert context.child_contexts == ["study1", "study2", "experiment_a", "experiment_d"]
-    assert len(context.wait_configs) == 5
+    assert len(context.wait_configs) == 4
     finalize.assert_called_once()
     assert finalize.call_args.kwargs["state"] == "SUCCEEDED"
     emit_metrics.assert_called_once()
+
+
+def test_experiment_a_predict_submit_runs_once_across_durable_replay(mod):
+    class ReplayContext:
+        def __init__(self):
+            self.step_results = {}
+            self.wait_counts = {"experiment_a_edit": 0, "experiment_a_predict": 0}
+
+        def step(self, func, name):
+            if name not in self.step_results:
+                self.step_results[name] = func()
+            return self.step_results[name]
+
+        def run_in_child_context(self, func, name):
+            return func(self)
+
+        def wait_for_condition(self, config):
+            phase_key = config.initial_state["phase_key"]
+            self.wait_counts[phase_key] = self.wait_counts.get(phase_key, 0) + 1
+            if phase_key == "experiment_a_predict" and self.wait_counts[phase_key] == 1:
+                raise mod.WorkflowDeferred(phase="EXPERIMENT_A", step="EXPERIMENT_A_WAIT")
+            return {"done": True}
+
+    context = ReplayContext()
+    run_id = "123e4567-e89b-42d3-a456-426614174019"
+
+    with (
+        patch.object(
+            mod,
+            "_load_config",
+            return_value={
+                "poll_interval_sec": 10,
+                "models": ["apac.amazon.nova-micro-v1:0"],
+                "shard_size": 500,
+            },
+        ),
+        patch.object(
+            mod,
+            "_prepare_experiment_a",
+            return_value={"manifest_count": 1, "seed_invalid_key": "runs/tmp/seed.jsonl"},
+        ) as prepare_experiment_a,
+        patch.object(
+            mod,
+            "_submit_experiment_a_prediction_jobs",
+            return_value={"manifest_count": 2, "edit_invalid_key": "runs/tmp/edit.jsonl"},
+        ) as submit_predict,
+        patch.object(mod, "_normalize_experiment_a", return_value=([], [])),
+        patch.object(mod.projection, "mark_running"),
+    ):
+        with pytest.raises(mod.WorkflowDeferred):
+            mod._run_experiment_a_workflow(
+                context,
+                run_id,
+                "trace-1",
+                mod._initial_workflow_state(),
+            )
+
+        mod._run_experiment_a_workflow(
+            context,
+            run_id,
+            "trace-1",
+            mod._initial_workflow_state(),
+        )
+
+    assert prepare_experiment_a.call_count == 1
+    assert submit_predict.call_count == 1
 
 
 def test_run_child_context_falls_back_to_legacy_signature(mod):

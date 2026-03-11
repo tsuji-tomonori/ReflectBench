@@ -28,6 +28,14 @@ def test_returns_400_when_constraints_invalid(mod):
     assert res["statusCode"] == 400
 
 
+def test_returns_400_when_batch_unsupported_model_requested(mod):
+    res = mod.handler(
+        _event({"loops": 10, "full_cross": True, "models": ["qwen.qwen3-32b-v1:0"]}),
+        None,
+    )
+    assert res["statusCode"] == 400
+
+
 def test_returns_400_when_body_is_not_object(mod):
     res = mod.handler({"body": "[]"}, None)
     assert res["statusCode"] == 400

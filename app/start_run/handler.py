@@ -37,7 +37,9 @@ def _request_hash(payload: RunCreateRequest | dict) -> str:
         request = RunCreateRequest.model_validate(payload)
     else:
         request = payload
+    models = request.models or DEFAULT_MODELS
     stable = {
+        "models": models,
         "loops": request.loops,
         "full_cross": request.full_cross,
         "shard_size": request.shard_size,
@@ -148,7 +150,7 @@ def handler(event, _context):
             retryable=False,
             step=step,
             trace_id=trace_id,
-            extra={"detail": exc.errors()},
+            extra={"detail": json.loads(exc.json())},
         )
 
     accepted_at = _now_iso()
@@ -196,10 +198,11 @@ def handler(event, _context):
     run_id = str(uuid.uuid4())
     config_key = f"runs/{run_id}/config.json"
     execution_name = run_id
+    models = request.models or DEFAULT_MODELS
     run_config = {
         "run_id": run_id,
         "region": "ap-southeast-2",
-        "models": DEFAULT_MODELS,
+        "models": models,
         "loops": request.loops,
         "full_cross": request.full_cross,
         "shard_size": request.shard_size,

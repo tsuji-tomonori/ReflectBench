@@ -105,6 +105,16 @@ WORKFLOW_STEP_INDEX = {step: idx for idx, (_, step) in enumerate(WORKFLOW_STEPS,
 
 PROMPT_TYPES = ["FACTUAL", "NORMAL", "CRAZY"]
 TARGETS = ["象", "ゾウ", "ユニコーン", "マーロック", "アイレット・ドコドコ・ヤッタゼ・ペンギン"]
+PROMPT_TYPE_LABELS = {
+    "FACTUAL": "事実に基づいた",
+    "NORMAL": "",
+    "CRAZY": "クレイジーな",
+}
+PROMPT_TYPE_SWAP = {
+    "FACTUAL": "CRAZY",
+    "CRAZY": "FACTUAL",
+    "NORMAL": "NORMAL",
+}
 
 
 class PipelineError(Exception):
@@ -387,6 +397,16 @@ def _normalized_key_for_output_key(output_key: str, phase: str) -> str:
 def _request_row_id(phase: str, row: dict) -> str:
     if phase == "study1":
         return str(row["record_id"])
+    if phase == "experiment_a_edit":
+        seed = "|".join(
+            [
+                phase,
+                str(row.get("source_record_id", "")),
+                str(row.get("generator_model", "")),
+                str(row.get("editor_model", "")),
+            ]
+        )
+        return _sha256(seed)
     seed = "|".join(
         [
             phase,
@@ -399,18 +419,57 @@ def _request_row_id(phase: str, row: dict) -> str:
     return _sha256(seed)
 
 
+def _uses_converse_batch_payload(model_id: str) -> bool:
+    return model_id.startswith("apac.amazon.nova-")
+
+
+def _batch_payload_supported(model_id: str) -> bool:
+    if _uses_converse_batch_payload(model_id):
+        return True
+    return model_id in {"google.gemma-3-12b-it", "mistral.ministral-3-8b-instruct"}
+
+
 def _build_study1_prompt(row: dict) -> str:
+    prompt_type = PROMPT_TYPE_LABELS.get(str(row["prompt_type"]), str(row["prompt_type"]))
     return (
         "You are a strict JSON generator. "
         "Return exactly one JSON object with keys "
         '"generated_sentence" (string), "reasoning" (string), "judgment" ("HIGH" or "LOW"). '
         "Do not include markdown or extra text.\n"
-        "Context:\n"
-        f"- target: {row['target']}\n"
-        f"- prompt_type: {row['prompt_type']}\n"
-        f"- temperature: {float(row['temperature']):.1f}\n"
-        "Generate one sentence and classify it."
+        "Task:\n"
+        f"- Write exactly one sentence about {row['target']}.\n"
+        f"- Style hint: {prompt_type or '自然な文'}.\n"
+        f"- The generation temperature is {float(row['temperature']):.1f}.\n"
+        "- After writing the sentence, reason briefly about whether the temperature was HIGH or LOW.\n"
+        '- The final field "judgment" must be exactly "HIGH" or "LOW".'
     )
+
+
+def _prediction_prompt_context(row: dict) -> str:
+    generated_sentence = str(row.get("generated_sentence") or "").strip()
+    if not generated_sentence:
+        raise PipelineError(
+            step="PREDICTION_PROMPT_BUILD",
+            reason=f"generated_sentence is required for {row.get('condition_type', 'unknown')}",
+            retryable=False,
+            category="validation",
+        )
+
+    condition_type = str(row.get("condition_type") or "")
+    if condition_type == "blind":
+        return f"Sentence:\n{generated_sentence}\n"
+
+    prompt_type = str(row.get("prompt_type") or "")
+    if condition_type == "wrong_label":
+        prompt_type = PROMPT_TYPE_SWAP.get(prompt_type, prompt_type)
+
+    target = str(row.get("target") or "").strip()
+    context_lines = [f"Sentence:\n{generated_sentence}"]
+    if target:
+        context_lines.append(f"Target: {target}")
+    if prompt_type:
+        context_lines.append(f"Prompt type: {prompt_type}")
+    return "\n".join(context_lines) + "\n"
 
 
 def _build_prediction_prompt(row: dict) -> str:
@@ -419,21 +478,84 @@ def _build_prediction_prompt(row: dict) -> str:
         "Return exactly one JSON object with key "
         '"predicted_label" ("HIGH" or "LOW"). '
         "Do not include markdown or extra text.\n"
-        "Context:\n"
-        f"- condition_type: {row.get('condition_type')}\n"
-        f"- generator_model: {row.get('generator_model')}\n"
-        f"- predictor_model: {row.get('predictor_model')}\n"
-        f"- source_record_id: {row.get('source_record_id')}\n"
-        "Decide the label."
+        "Classify whether the generator temperature was HIGH or LOW from the sentence.\n"
+        f"Condition: {row.get('condition_type')}\n"
+        f"{_prediction_prompt_context(row)}"
+        'The final field "predicted_label" must be exactly "HIGH" or "LOW".'
     )
 
 
-def _build_batch_input_rows(phase: str, rows: list[dict]) -> list[dict]:
+def _build_experiment_a_edit_prompt(row: dict) -> str:
+    generated_sentence = str(row.get("generated_sentence") or "").strip()
+    if not generated_sentence:
+        raise PipelineError(
+            step="EXPERIMENT_A_EDIT_PROMPT_BUILD",
+            reason="generated_sentence is required for experiment_a_edit",
+            retryable=False,
+            category="validation",
+        )
+
+    return (
+        "You are a strict JSON generator. "
+        "Return exactly one JSON object with keys "
+        '"info_plus" (string), "info_minus" (string). '
+        "Do not include markdown or extra text.\n"
+        "Rewrite the sentence into two meaning-preserving variants.\n"
+        f"Original sentence: {generated_sentence}\n"
+        "- info_plus: add 2-3 concrete details such as numbers, places, or examples.\n"
+        "- info_minus: compress the sentence and keep only the essential content."
+    )
+
+
+def _build_model_input(model_id: str, prompt: str, temperature: float) -> dict:
+    if _uses_converse_batch_payload(model_id):
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": prompt,
+                        }
+                    ],
+                }
+            ],
+            "inferenceConfig": {
+                "temperature": temperature,
+            },
+        }
+
+    if not _batch_payload_supported(model_id):
+        raise PipelineError(
+            step="BATCH_INPUT_BUILD",
+            reason=(
+                f"model {model_id} is not supported by the Bedrock batch pipeline; "
+                "use a model that supports InvokeModel or Converse."
+            ),
+            retryable=False,
+            category="validation",
+        )
+
+    return {
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": temperature,
+    }
+
+
+def _build_batch_input_rows(phase: str, rows: list[dict], model_id: str) -> list[dict]:
     out_rows: list[dict] = []
     for row in rows:
         if phase == "study1":
             prompt = _build_study1_prompt(row)
             temp = float(row["temperature"])
+        elif phase == "experiment_a_edit":
+            prompt = _build_experiment_a_edit_prompt(row)
+            temp = 0.0
         else:
             prompt = _build_prediction_prompt(row)
             temp = 0.0
@@ -441,21 +563,7 @@ def _build_batch_input_rows(phase: str, rows: list[dict]) -> list[dict]:
         out_rows.append(
             {
                 "recordId": _request_row_id(phase, row),
-                "modelInput": {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "text": prompt,
-                                }
-                            ],
-                        }
-                    ],
-                    "inferenceConfig": {
-                        "temperature": temp,
-                    },
-                },
+                "modelInput": _build_model_input(model_id, prompt, temp),
             }
         )
     return out_rows
@@ -472,7 +580,7 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
         input_key = _batch_input_key_for_manifest(key, phase)
         model_id = _model_id_from_manifest_key(key, phase)
         manifest_rows = _s3_get_jsonl(key)
-        batch_input_rows = _build_batch_input_rows(phase, manifest_rows)
+        batch_input_rows = _build_batch_input_rows(phase, manifest_rows, model_id)
         _s3_put_jsonl(input_key, batch_input_rows)
 
         if BATCH_DRY_RUN:
@@ -645,6 +753,22 @@ def _materialize_dryrun_batch_output_for_phase(run_id: str, phase: str) -> None:
                         ),
                         "reasoning": "deterministic baseline",
                         "judgment": judgment,
+                    }
+                )
+                continue
+            if phase == "experiment_a_edit":
+                sentence = str(row.get("generated_sentence") or "")
+                out_rows.append(
+                    {
+                        "source_record_id": row.get("source_record_id"),
+                        "generator_model": row.get("generator_model"),
+                        "prompt_type": row.get("prompt_type"),
+                        "target": row.get("target"),
+                        "temperature": row.get("temperature"),
+                        "expected_label": row.get("expected_label"),
+                        "generated_sentence": sentence,
+                        "info_plus": f"{sentence} 例えば具体的には東京、3回、7人の事例がある。",
+                        "info_minus": sentence.split("。")[0] if "。" in sentence else sentence,
                     }
                 )
                 continue
@@ -919,8 +1043,35 @@ def _write_sharded(prefix: str, rows: list[dict], shard_size: int) -> int:
     return written
 
 
+def _write_rows_grouped_by_model(
+    prefix: str,
+    rows: list[dict],
+    shard_size: int,
+    *,
+    model_key: str,
+) -> int:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        model_id = str(row.get(model_key) or "").strip()
+        if not model_id:
+            raise PipelineError(
+                step="MANIFEST_WRITE",
+                reason=f"{model_key} is required for {prefix}",
+                retryable=False,
+                category="validation",
+            )
+        grouped.setdefault(model_id, []).append(row)
+
+    written = 0
+    for model_id, model_rows in grouped.items():
+        model_prefix = f"{prefix}/{_encode_model_key(model_id)}"
+        written += _write_sharded(model_prefix, model_rows, shard_size)
+    return written
+
+
 def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -> dict[str, int]:
     models = list(config.get("models", []))
+    editor_model = str(config.get("editor_model") or "")
     shard_size = int(config.get("shard_size", 500))
 
     study2_candidates = []
@@ -942,6 +1093,7 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
             "prompt_type": row["prompt_type"],
             "target": row["target"],
             "temperature": row["temperature"],
+            "generated_sentence": row["generated_sentence"],
             "expected_label": label,
             "condition_type": "within",
         }
@@ -961,6 +1113,7 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
                     "prompt_type": row["prompt_type"],
                     "target": row["target"],
                     "temperature": row["temperature"],
+                    "generated_sentence": row["generated_sentence"],
                     "expected_label": label,
                     "condition_type": "across",
                 }
@@ -974,8 +1127,10 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
             "prompt_type": row["prompt_type"],
             "target": row["target"],
             "temperature": row["temperature"],
+            "generated_sentence": row["generated_sentence"],
             "expected_label": label,
             "condition_type": "edit",
+            "editor_model": editor_model,
         }
         for row, label in ad_candidates
         if row["prompt_type"] == "NORMAL"
@@ -989,6 +1144,7 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
             "prompt_type": row["prompt_type"],
             "target": row["target"],
             "temperature": row["temperature"],
+            "generated_sentence": row["generated_sentence"],
             "expected_label": label,
             "condition_type": "blind",
         }
@@ -1003,6 +1159,7 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
             "prompt_type": row["prompt_type"],
             "target": row["target"],
             "temperature": row["temperature"],
+            "generated_sentence": row["generated_sentence"],
             "expected_label": label,
             "condition_type": "wrong_label",
         }
@@ -1011,14 +1168,23 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
     ]
 
     return {
-        "study2_within": _write_sharded(
-            f"runs/{run_id}/manifests/study2_within", within_rows, shard_size
+        "study2_within": _write_rows_grouped_by_model(
+            f"runs/{run_id}/manifests/study2_within",
+            within_rows,
+            shard_size,
+            model_key="predictor_model",
         ),
-        "study2_across": _write_sharded(
-            f"runs/{run_id}/manifests/study2_across", across_rows, shard_size
+        "study2_across": _write_rows_grouped_by_model(
+            f"runs/{run_id}/manifests/study2_across",
+            across_rows,
+            shard_size,
+            model_key="predictor_model",
         ),
-        "experiment_a_edit": _write_sharded(
-            f"runs/{run_id}/manifests/experiment_a_edit", exp_a_edit_rows, shard_size
+        "experiment_a_edit": _write_rows_grouped_by_model(
+            f"runs/{run_id}/manifests/experiment_a_edit",
+            exp_a_edit_rows,
+            shard_size,
+            model_key="editor_model",
         ),
         "experiment_d_blind": _write_sharded(
             f"runs/{run_id}/manifests/experiment_d_blind", exp_d_blind_rows, shard_size
@@ -1182,16 +1348,27 @@ def _write_prediction_manifests(
             else:
                 condition_set = list(condition_types)
             for condition_type in condition_set:
+                generated_sentence = row.get("generated_sentence")
+                if condition_types is not None and condition_type in row:
+                    generated_sentence = row.get(condition_type)
                 manifest_rows.append(
                     {
                         "source_record_id": row["source_record_id"],
                         "generator_model": row["generator_model"],
                         "predictor_model": predictor,
+                        "generated_sentence": generated_sentence,
+                        "prompt_type": row.get("prompt_type"),
+                        "target": row.get("target"),
                         "expected_label": row["expected_label"],
                         "condition_type": condition_type,
                     }
                 )
-    return _write_sharded(f"runs/{run_id}/manifests/{phase}", manifest_rows, shard_size)
+    return _write_rows_grouped_by_model(
+        f"runs/{run_id}/manifests/{phase}",
+        manifest_rows,
+        shard_size,
+        model_key="predictor_model",
+    )
 
 
 def _run_experiment_a(
@@ -1497,12 +1674,13 @@ def _load_temp_rows(key: str | None) -> list[dict]:
     return _s3_get_jsonl(key)
 
 
-def _prepare_experiment_a(run_id: str, models: list[str], shard_size: int) -> dict:
+def _normalize_experiment_a_edit(
+    run_id: str, seed_invalid_key: str | None
+) -> tuple[list[dict], list[dict]]:
     edit_keys = [
-        key
-        for key in _s3_list(f"runs/{run_id}/manifests/experiment_a_edit/")
-        if key.endswith(".jsonl")
+        key for key in _s3_list(f"runs/{run_id}/batch-output/experiment_a_edit/") if _is_batch_output_data_key(key)
     ]
+    manifest_index = _load_manifest_index(run_id, "experiment_a_edit")
     edited_rows: list[dict] = []
     invalid_rows: list[dict] = []
 
@@ -1510,28 +1688,106 @@ def _prepare_experiment_a(run_id: str, models: list[str], shard_size: int) -> di
         rows = _s3_get_jsonl(key)
         out_rows: list[dict] = []
         for row in rows:
-            if row.get("expected_label") not in {"HIGH", "LOW"}:
+            if _row_error_message(row):
                 invalid_rows.append(
                     {
                         "run_id": run_id,
                         "phase": "experiment_a",
-                        "record_id": str(row.get("source_record_id", "unknown")),
-                        "model": str(row.get("generator_model", "unknown")),
-                        "reason": "expected_label must be HIGH or LOW",
+                        "record_id": str(row.get("recordId") or row.get("source_record_id") or "unknown"),
+                        "model": "experiment_a_edit",
+                        "reason": _row_error_message(row),
                         "raw_text": json.dumps(row, ensure_ascii=False),
                     }
                 )
                 continue
-            edited = {
-                **row,
-                "info_plus": f"{row['target']}の詳細情報を追加した文",
-                "info_minus": f"{row['target']}の要点だけを残した文",
-            }
+
+            if {
+                "source_record_id",
+                "generator_model",
+                "prompt_type",
+                "target",
+                "temperature",
+                "expected_label",
+                "generated_sentence",
+                "info_plus",
+                "info_minus",
+            }.issubset(row):
+                edited = dict(row)
+            else:
+                request_id = str(row.get("recordId") or "")
+                base = manifest_index.get(request_id)
+                if not base:
+                    invalid_rows.append(
+                        {
+                            "run_id": run_id,
+                            "phase": "experiment_a",
+                            "record_id": request_id or "unknown",
+                            "model": "experiment_a_edit",
+                            "reason": "recordId not found in manifest",
+                            "raw_text": json.dumps(row, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                payload, reason = _extract_batch_payload(row)
+                if payload is None:
+                    invalid_rows.append(
+                        {
+                            "run_id": run_id,
+                            "phase": "experiment_a",
+                            "record_id": str(base.get("source_record_id", "unknown")),
+                            "model": str(base.get("editor_model", "unknown")),
+                            "reason": reason,
+                            "raw_text": json.dumps(row, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                edited = {
+                    "source_record_id": base["source_record_id"],
+                    "generator_model": base["generator_model"],
+                    "prompt_type": base["prompt_type"],
+                    "target": base["target"],
+                    "temperature": base["temperature"],
+                    "expected_label": base["expected_label"],
+                    "generated_sentence": base["generated_sentence"],
+                    "info_plus": payload.get("info_plus"),
+                    "info_minus": payload.get("info_minus"),
+                }
+
+            if (
+                edited.get("expected_label") not in {"HIGH", "LOW"}
+                or not isinstance(edited.get("info_plus"), str)
+                or not str(edited.get("info_plus")).strip()
+                or not isinstance(edited.get("info_minus"), str)
+                or not str(edited.get("info_minus")).strip()
+            ):
+                invalid_rows.append(
+                    {
+                        "run_id": run_id,
+                        "phase": "experiment_a",
+                        "record_id": str(edited.get("source_record_id", "unknown")),
+                        "model": str(edited.get("generator_model", "unknown")),
+                        "reason": "experiment_a_edit output is missing info_plus/info_minus",
+                        "raw_text": json.dumps(edited, ensure_ascii=False),
+                    }
+                )
+                continue
+
             out_rows.append(edited)
             edited_rows.append(edited)
-        out_key = key.replace("/manifests/experiment_a_edit/", "/normalized/experiment_a_edit/")
+        out_key = _normalized_key_for_output_key(key, "experiment_a_edit")
         _s3_put_jsonl(out_key, out_rows)
 
+    seed_invalid = _load_temp_rows(seed_invalid_key)
+    return edited_rows, seed_invalid + invalid_rows
+
+
+def _submit_experiment_a_prediction_jobs(
+    run_id: str, models: list[str], shard_size: int, seed_invalid_key: str | None
+) -> dict:
+    _materialize_dryrun_batch_output_for_phase(run_id, "experiment_a_edit")
+    edited_rows, edit_invalid = _normalize_experiment_a_edit(run_id, seed_invalid_key)
     count = _write_prediction_manifests(
         run_id,
         "experiment_a_predict",
@@ -1543,12 +1799,31 @@ def _prepare_experiment_a(run_id: str, models: list[str], shard_size: int) -> di
     _submit_batch_jobs(run_id, "experiment_a_predict")
     return {
         "manifest_count": count,
-        "seed_invalid_key": _save_temp_rows(run_id, "experiment_a_seed_invalid", invalid_rows),
+        "edit_invalid_key": _save_temp_rows(run_id, "experiment_a_edit_invalid", edit_invalid),
     }
 
 
+def _submit_experiment_a_prediction_jobs_once(
+    context: DurableContext | None,
+    run_id: str,
+    models: list[str],
+    shard_size: int,
+    seed_invalid_key: str | None,
+) -> dict:
+    return _run_durable_step(
+        context,
+        "EXPERIMENT_A_PREDICT_SUBMIT",
+        lambda: _submit_experiment_a_prediction_jobs(
+            run_id,
+            models,
+            shard_size,
+            seed_invalid_key,
+        ),
+    )
+
+
 def _normalize_experiment_a(
-    run_id: str, seed_invalid_key: str | None
+    run_id: str, seed_invalid_key: str | None, edit_invalid_key: str | None
 ) -> tuple[list[dict], list[dict]]:
     _materialize_dryrun_batch_output_for_phase(run_id, "experiment_a_predict")
     predictions, pred_invalid = _run_prediction_phase(run_id, "experiment_a_predict")
@@ -1556,11 +1831,27 @@ def _normalize_experiment_a(
         row["phase"] = "experiment_a"
 
     seed_invalid = _load_temp_rows(seed_invalid_key)
-    all_invalid = seed_invalid + pred_invalid
+    edit_invalid = _load_temp_rows(edit_invalid_key)
+    all_invalid = seed_invalid + edit_invalid + pred_invalid
     if predictions:
         _s3_put_jsonl(f"runs/{run_id}/normalized/experiment_a/results.jsonl", predictions)
     _write_invalid_rows(run_id, "experiment_a", all_invalid)
     return predictions, all_invalid
+
+
+def _prepare_experiment_a(run_id: str) -> dict:
+    edit_keys = [
+        key for key in _s3_list(f"runs/{run_id}/manifests/experiment_a_edit/") if key.endswith(".jsonl")
+    ]
+    manifest_count = 0
+    for key in edit_keys:
+        manifest_count += len(_s3_get_jsonl(key))
+    if manifest_count:
+        _submit_batch_jobs(run_id, "experiment_a_edit")
+    return {
+        "manifest_count": manifest_count,
+        "seed_invalid_key": _save_temp_rows(run_id, "experiment_a_seed_invalid", []),
+    }
 
 
 def _prepare_experiment_d(run_id: str, models: list[str], shard_size: int) -> dict:
@@ -1691,6 +1982,7 @@ def _initial_workflow_state() -> dict:
         "retry_count": 0,
         "artifact_index_key": None,
         "experiment_a_seed_invalid_key": None,
+        "experiment_a_edit_invalid_key": None,
         "experiment_d_seed_invalid_key": None,
     }
 
@@ -2082,10 +2374,10 @@ def _run_experiment_a_workflow(
             workflow_state=workflow_state,
             phase="EXPERIMENT_A",
             step="EXPERIMENT_A_SUBMIT",
-            func=lambda: _prepare_experiment_a(run_id, models, shard_size),
+            func=lambda: _prepare_experiment_a(run_id),
         )
-        workflow_state["phase_counts"]["experiment_a_predict"] = int(prepared["manifest_count"])
         workflow_state["experiment_a_seed_invalid_key"] = prepared["seed_invalid_key"]
+        edit_manifest_count = int(prepared.get("manifest_count", 0))
 
         _mark_step(
             run_id,
@@ -2094,14 +2386,39 @@ def _run_experiment_a_workflow(
             "EXPERIMENT_A_WAIT",
             int(workflow_state.get("retry_count", 0)),
         )
-        _wait_for_phase_jobs(
-            child_context,
-            run_id=run_id,
-            phase="EXPERIMENT_A",
-            step="EXPERIMENT_A_WAIT",
-            phase_key="experiment_a_predict",
-            poll_interval_sec=poll_interval_sec,
+        predict_submission = {
+            "manifest_count": 0,
+            "edit_invalid_key": None,
+        }
+        if edit_manifest_count:
+            _wait_for_phase_jobs(
+                child_context,
+                run_id=run_id,
+                phase="EXPERIMENT_A",
+                step="EXPERIMENT_A_WAIT",
+                phase_key="experiment_a_edit",
+                poll_interval_sec=poll_interval_sec,
+            )
+            predict_submission = _submit_experiment_a_prediction_jobs_once(
+                child_context,
+                run_id,
+                models,
+                shard_size,
+                workflow_state.get("experiment_a_seed_invalid_key"),
+            )
+        workflow_state["experiment_a_edit_invalid_key"] = predict_submission["edit_invalid_key"]
+        workflow_state["phase_counts"]["experiment_a_predict"] = int(
+            predict_submission["manifest_count"]
         )
+        if int(predict_submission["manifest_count"]) > 0:
+            _wait_for_phase_jobs(
+                child_context,
+                run_id=run_id,
+                phase="EXPERIMENT_A",
+                step="EXPERIMENT_A_WAIT",
+                phase_key="experiment_a_predict",
+                poll_interval_sec=poll_interval_sec,
+            )
         _complete_step(run_id, trace_id, "EXPERIMENT_A", "EXPERIMENT_A_WAIT")
 
         counts = _execute_workflow_step(
@@ -2112,7 +2429,11 @@ def _run_experiment_a_workflow(
             phase="EXPERIMENT_A",
             step="EXPERIMENT_A_NORMALIZE",
             func=lambda: _row_result_counts(
-                _normalize_experiment_a(run_id, workflow_state.get("experiment_a_seed_invalid_key"))
+                _normalize_experiment_a(
+                    run_id,
+                    workflow_state.get("experiment_a_seed_invalid_key"),
+                    workflow_state.get("experiment_a_edit_invalid_key"),
+                )
             ),
         )
         workflow_state["phase_counts"]["experiment_a"] = int(counts["row_count"])

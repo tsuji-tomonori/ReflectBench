@@ -290,7 +290,7 @@ def test_submit_batch_jobs_retries_once_per_shard(mod):
         "record_id": "r-1",
         "run_id": run_id,
         "phase": "study1",
-        "model_id": "model-a",
+        "model_id": "apac.amazon.nova-micro-v1:0",
         "temperature": 0.3,
         "prompt_type": "FACTUAL",
         "target": "x",
@@ -303,7 +303,7 @@ def test_submit_batch_jobs_retries_once_per_shard(mod):
         patch.object(mod, "_s3_list", return_value=[manifest_key]),
         patch.object(mod, "_s3_get_jsonl", return_value=[manifest_row]),
         patch.object(mod, "_s3_put_jsonl") as put_jsonl,
-        patch.object(mod, "_model_id_from_manifest_key", return_value="model-a"),
+        patch.object(mod, "_model_id_from_manifest_key", return_value="apac.amazon.nova-micro-v1:0"),
         patch.object(mod.bedrock, "create_model_invocation_job") as submit_job,
         patch.object(mod, "_s3_put_json") as put_json,
     ):
@@ -325,6 +325,9 @@ def test_submit_batch_jobs_sanitizes_bedrock_job_name(mod):
         "source_record_id": "src-1",
         "generator_model": "g1",
         "predictor_model": "p1",
+        "generated_sentence": "x は y についての文です。",
+        "prompt_type": "FACTUAL",
+        "target": "x",
         "expected_label": "HIGH",
         "condition_type": "within",
     }
@@ -335,7 +338,7 @@ def test_submit_batch_jobs_sanitizes_bedrock_job_name(mod):
         patch.object(mod, "_s3_list", return_value=[manifest_key]),
         patch.object(mod, "_s3_get_jsonl", return_value=[manifest_row]),
         patch.object(mod, "_s3_put_jsonl"),
-        patch.object(mod, "_model_id_from_manifest_key", return_value="model-a"),
+        patch.object(mod, "_model_id_from_manifest_key", return_value="google.gemma-3-12b-it"),
         patch.object(
             mod.bedrock,
             "create_model_invocation_job",
@@ -356,7 +359,7 @@ def test_build_batch_input_rows_contains_messages(mod):
             "record_id": "r-1",
             "run_id": "123e4567-e89b-42d3-a456-426614174000",
             "phase": "study1",
-            "model_id": "model-a",
+            "model_id": "apac.amazon.nova-micro-v1:0",
             "temperature": 0.0,
             "prompt_type": "FACTUAL",
             "target": "x",
@@ -364,12 +367,68 @@ def test_build_batch_input_rows_contains_messages(mod):
         }
     ]
 
-    out = mod._build_batch_input_rows("study1", rows)
+    out = mod._build_batch_input_rows("study1", rows, "apac.amazon.nova-micro-v1:0")
 
     assert len(out) == 1
     assert out[0]["recordId"] == "r-1"
     assert out[0]["modelInput"]["messages"][0]["role"] == "user"
     assert out[0]["modelInput"]["messages"][0]["content"][0]["text"]
+
+
+def test_build_batch_input_rows_uses_string_content_for_gemma(mod):
+    rows = [
+        {
+            "record_id": "r-1",
+            "run_id": "123e4567-e89b-42d3-a456-426614174000",
+            "phase": "study1",
+            "model_id": "google.gemma-3-12b-it",
+            "temperature": 0.2,
+            "prompt_type": "FACTUAL",
+            "target": "x",
+            "loop_index": 0,
+        }
+    ]
+
+    out = mod._build_batch_input_rows("study1", rows, "google.gemma-3-12b-it")
+
+    assert isinstance(out[0]["modelInput"]["messages"][0]["content"], str)
+    assert out[0]["modelInput"]["temperature"] == 0.2
+    assert "inferenceConfig" not in out[0]["modelInput"]
+
+
+def test_write_prediction_manifests_groups_rows_by_predictor_model(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174018"
+    base_rows = [
+        {
+            "source_record_id": "src-1",
+            "generator_model": "g1",
+            "predictor_model": "g1",
+            "generated_sentence": "sentence",
+            "prompt_type": "FACTUAL",
+            "target": "x",
+            "expected_label": "HIGH",
+            "condition_type": "within",
+        }
+    ]
+
+    with patch.object(mod, "_s3_put_jsonl") as put_jsonl:
+        written = mod._write_prediction_manifests(
+            run_id,
+            "study2_across",
+            base_rows,
+            ["google.gemma-3-12b-it", "mistral.ministral-3-8b-instruct"],
+            500,
+        )
+
+    assert written == 2
+    keys = [call.args[0] for call in put_jsonl.call_args_list]
+    assert any("/study2_across/google.gemma-3-12b-it/" in key for key in keys)
+    assert any("/study2_across/mistral.ministral-3-8b-instruct/" in key for key in keys)
+    for call in put_jsonl.call_args_list:
+        rows = call.args[1]
+        predictor_models = {row["predictor_model"] for row in rows}
+        assert len(predictor_models) == 1
+        assert rows[0]["generated_sentence"] == "sentence"
 
 
 def test_normalize_study1_parses_batch_wrapper(mod):
