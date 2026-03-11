@@ -32,8 +32,14 @@ def build_run_item(
     request_hash: str,
     config_s3_key: str,
     execution_name: str,
+    parent_run_id: str | None = None,
+    repair_phase: str | None = None,
+    repair_scope: str | None = None,
+    repair_mode: str | None = None,
+    rebuild_downstream: bool | None = None,
+    source_invalid_keys: list[str] | None = None,
 ) -> dict:
-    return {
+    item = {
         "run_id": {"S": run_id},
         "phase": {"S": "STUDY1"},
         "step": {"S": "STUDY1_ENUMERATE"},
@@ -46,6 +52,19 @@ def build_run_item(
         "created_at": {"S": accepted_at},
         "updated_at": {"S": accepted_at},
     }
+    if parent_run_id:
+        item["parent_run_id"] = {"S": parent_run_id}
+    if repair_phase:
+        item["repair_phase"] = {"S": repair_phase}
+    if repair_scope:
+        item["repair_scope"] = {"S": repair_scope}
+    if repair_mode:
+        item["repair_mode"] = {"S": repair_mode}
+    if rebuild_downstream is not None:
+        item["rebuild_downstream"] = {"BOOL": rebuild_downstream}
+    if source_invalid_keys is not None:
+        item["source_invalid_keys"] = {"L": [{"S": key} for key in source_invalid_keys]}
+    return item
 
 
 def save_execution_metadata(

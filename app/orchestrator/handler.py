@@ -1528,13 +1528,18 @@ def _load_normalized_rows(run_id: str, phase: str) -> list[dict]:
 
 
 def _write_reports(
-    run_id: str, phase_counts: dict[str, int], invalid_counts: dict[str, int]
+    run_id: str,
+    phase_counts: dict[str, int],
+    invalid_counts: dict[str, int],
+    *,
+    study1_rows_override: list[dict] | None = None,
 ) -> None:
-    study1_rows = _load_normalized_rows(run_id, "study1")
+    study1_rows = study1_rows_override if study1_rows_override is not None else _load_normalized_rows(run_id, "study1")
     within_rows = _load_normalized_rows(run_id, "study2_within")
     across_rows = _load_normalized_rows(run_id, "study2_across")
     experiment_a_rows = _load_normalized_rows(run_id, "experiment_a")
     experiment_d_rows = _load_normalized_rows(run_id, "experiment_d")
+    config = _load_config(run_id)
 
     model_counter = Counter(row["model_id"] for row in study1_rows if "model_id" in row)
     study1_summary = [
@@ -1594,6 +1599,22 @@ def _write_reports(
             "invalid_counts": invalid_counts,
             "excluded_reasons": {},
             "estimated_model_cost_usd": 2.66,
+            "lineage": (
+                {"parent_run_id": config.get("parent_run_id")}
+                if config.get("parent_run_id")
+                else None
+            ),
+            "repair": (
+                {
+                    "phase": config.get("repair_phase"),
+                    "scope": config.get("repair_scope"),
+                    "mode": config.get("repair_mode"),
+                    "rebuild_downstream": config.get("rebuild_downstream"),
+                    "source_invalid_keys": config.get("source_invalid_keys", []),
+                }
+                if _is_repair_run(config)
+                else None
+            ),
         },
     )
 
@@ -1672,6 +1693,124 @@ def _load_temp_rows(key: str | None) -> list[dict]:
     if not key:
         return []
     return _s3_get_jsonl(key)
+
+
+def _is_repair_run(config: dict) -> bool:
+    return bool(config.get("parent_run_id") and config.get("repair_phase"))
+
+
+def _load_repair_seed_rows(config: dict) -> list[dict]:
+    seed_key = str(config.get("repair_seed_key") or "").strip()
+    if not seed_key:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="repair_seed_key is required for repair run",
+            retryable=False,
+            category="validation",
+        )
+    return _s3_get_jsonl(seed_key)
+
+
+def _prepare_repair_study1(run_id: str, config: dict) -> dict[str, int]:
+    seed_rows = _load_repair_seed_rows(config)
+    if not seed_rows:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="repair seed is empty",
+            retryable=False,
+            category="validation",
+        )
+
+    shard_size = int(config.get("shard_size", 500))
+    mode = str(config.get("repair_mode") or "")
+    total = 0
+    grouped: dict[str, list[dict]] = {}
+    for row in seed_rows:
+        model_id = str(row.get("model_id") or "")
+        if not model_id:
+            raise PipelineError(
+                step="STUDY1_ENUMERATE",
+                reason="repair seed row is missing model_id",
+                retryable=False,
+                category="validation",
+            )
+        grouped.setdefault(model_id, []).append(row)
+
+    for model_id, model_rows in grouped.items():
+        model_key = _encode_model_key(model_id)
+        part = 1
+        manifest_chunk: list[dict] = []
+        output_chunk: list[dict] = []
+        for row in model_rows:
+            manifest_row = row.get("manifest_row")
+            if not isinstance(manifest_row, dict):
+                raise PipelineError(
+                    step="STUDY1_ENUMERATE",
+                    reason="repair seed row is missing manifest_row",
+                    retryable=False,
+                    category="validation",
+                )
+            manifest_chunk.append(manifest_row)
+            if mode == "renormalize":
+                invalid_output = row.get("invalid_output")
+                if not isinstance(invalid_output, dict):
+                    raise PipelineError(
+                        step="STUDY1_ENUMERATE",
+                        reason="repair seed row is missing invalid_output",
+                        retryable=False,
+                        category="validation",
+                    )
+                output_chunk.append(invalid_output)
+            if len(manifest_chunk) == shard_size:
+                manifest_key = (
+                    f"runs/{run_id}/manifests/study1/{model_key}/repair-part-{part:05d}.jsonl"
+                )
+                _s3_put_jsonl(manifest_key, manifest_chunk)
+                if output_chunk:
+                    output_key = (
+                        f"runs/{run_id}/batch-output/study1/{model_key}/repair-part-{part:05d}.jsonl"
+                    )
+                    _s3_put_jsonl(output_key, output_chunk)
+                total += len(manifest_chunk)
+                manifest_chunk = []
+                output_chunk = []
+                part += 1
+        if manifest_chunk:
+            manifest_key = (
+                f"runs/{run_id}/manifests/study1/{model_key}/repair-part-{part:05d}.jsonl"
+            )
+            _s3_put_jsonl(manifest_key, manifest_chunk)
+            if output_chunk:
+                output_key = (
+                    f"runs/{run_id}/batch-output/study1/{model_key}/repair-part-{part:05d}.jsonl"
+                )
+                _s3_put_jsonl(output_key, output_chunk)
+            total += len(manifest_chunk)
+
+    return {
+        "target_count": total,
+    }
+
+
+def _build_merged_study1_rows_for_repair(
+    run_id: str, config: dict, repair_rows: list[dict]
+) -> list[dict]:
+    parent_run_id = str(config.get("parent_run_id") or "")
+    if not parent_run_id:
+        raise PipelineError(
+            step="STUDY1_NORMALIZE",
+            reason="parent_run_id is required for repair run",
+            retryable=False,
+            category="validation",
+        )
+
+    parent_rows = _load_normalized_rows(parent_run_id, "study1")
+    repaired_ids = {str(row.get("record_id")) for row in repair_rows if row.get("record_id")}
+    merged_rows = [row for row in parent_rows if str(row.get("record_id")) not in repaired_ids]
+    merged_rows.extend(repair_rows)
+    merged_rows.sort(key=lambda row: str(row.get("record_id", "")))
+    _s3_put_jsonl(f"runs/{run_id}/normalized/study1/merged.jsonl", merged_rows)
+    return merged_rows
 
 
 def _normalize_experiment_a_edit(
@@ -1944,9 +2083,18 @@ def _materialize_and_run_prediction_phase(
 
 
 def _write_reports_and_index(
-    run_id: str, phase_counts: dict, invalid_counts: dict[str, int]
+    run_id: str,
+    phase_counts: dict,
+    invalid_counts: dict[str, int],
+    *,
+    study1_rows_override: list[dict] | None = None,
 ) -> str:
-    _write_reports(run_id, phase_counts, invalid_counts)
+    _write_reports(
+        run_id,
+        phase_counts,
+        invalid_counts,
+        study1_rows_override=study1_rows_override,
+    )
     return _write_artifact_index(run_id)
 
 
@@ -1981,6 +2129,8 @@ def _initial_workflow_state() -> dict:
         "invalid_counts": {},
         "retry_count": 0,
         "artifact_index_key": None,
+        "study1_rows_for_downstream": None,
+        "study1_rows_for_reports": None,
         "experiment_a_seed_invalid_key": None,
         "experiment_a_edit_invalid_key": None,
         "experiment_d_seed_invalid_key": None,
@@ -2259,10 +2409,92 @@ def _run_study1(context: DurableContext | None, run_id: str, trace_id: str, work
     return _run_child_context(context, "study1", _child)
 
 
+def _run_repair_study1(
+    context: DurableContext | None,
+    run_id: str,
+    trace_id: str,
+    workflow_state: dict,
+    config: dict,
+):
+    def _child(child_context: DurableContext | None):
+        poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
+
+        prepared = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY1",
+            step="STUDY1_ENUMERATE",
+            func=lambda: _prepare_repair_study1(run_id, config),
+        )
+
+        if int(prepared.get("target_count", 0)) <= 0:
+            raise PipelineError(
+                step="STUDY1_ENUMERATE",
+                reason="repair target count must be greater than zero",
+                retryable=False,
+                category="validation",
+            )
+
+        if str(config.get("repair_mode")) == "rerun":
+            _execute_workflow_step(
+                child_context,
+                run_id=run_id,
+                trace_id=trace_id,
+                workflow_state=workflow_state,
+                phase="STUDY1",
+                step="STUDY1_SUBMIT",
+                func=lambda: _submit_batch_jobs(run_id, "study1"),
+            )
+            _mark_step(
+                run_id,
+                trace_id,
+                "STUDY1",
+                "STUDY1_WAIT",
+                int(workflow_state.get("retry_count", 0)),
+            )
+            _wait_for_phase_jobs(
+                child_context,
+                run_id=run_id,
+                phase="STUDY1",
+                step="STUDY1_WAIT",
+                phase_key="study1",
+                poll_interval_sec=poll_interval_sec,
+            )
+            _complete_step(run_id, trace_id, "STUDY1", "STUDY1_WAIT")
+
+        counts = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="STUDY1",
+            step="STUDY1_NORMALIZE",
+            func=lambda: _row_result_counts(_normalize_study1(run_id)),
+        )
+        repair_rows = _load_normalized_rows(run_id, "study1")
+        if bool(config.get("rebuild_downstream")):
+            merged_rows = _build_merged_study1_rows_for_repair(run_id, config, repair_rows)
+            workflow_state["study1_rows_for_downstream"] = merged_rows
+            workflow_state["study1_rows_for_reports"] = merged_rows
+            workflow_state["phase_counts"]["study1"] = len(merged_rows)
+        else:
+            workflow_state["study1_rows_for_downstream"] = repair_rows
+            workflow_state["study1_rows_for_reports"] = repair_rows
+            workflow_state["phase_counts"]["study1"] = len(repair_rows)
+        workflow_state["invalid_counts"]["study1"] = int(counts["invalid_count"])
+
+    return _run_child_context(context, "study1_repair", _child)
+
+
 def _run_study2(context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict):
     def _child(child_context: DurableContext | None):
         config = _load_config(run_id)
         poll_interval_sec = int(config.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))
+        study1_rows = workflow_state.get("study1_rows_for_downstream")
+        if study1_rows is None:
+            study1_rows = _load_normalized_rows(run_id, "study1")
 
         prepared = _execute_workflow_step(
             child_context,
@@ -2271,9 +2503,7 @@ def _run_study2(context: DurableContext | None, run_id: str, trace_id: str, work
             workflow_state=workflow_state,
             phase="STUDY2",
             step="STUDY2_PREPARE",
-            func=lambda: _prepare_downstream_manifests(
-                run_id, _load_normalized_rows(run_id, "study1"), config
-            ),
+            func=lambda: _prepare_downstream_manifests(run_id, study1_rows, config),
         )
         workflow_state["phase_counts"].update(prepared)
 
@@ -2510,6 +2740,7 @@ def _run_report(context: DurableContext | None, run_id: str, trace_id: str, work
             run_id,
             workflow_state["phase_counts"],
             invalid_counts,
+            study1_rows_override=workflow_state.get("study1_rows_for_reports"),
         ),
     )
 
@@ -2529,10 +2760,18 @@ def handler(event, context: DurableContext | None):
     workflow_state = _initial_workflow_state()
 
     try:
-        _run_study1(context, run_id, trace_id, workflow_state)
-        _run_study2(context, run_id, trace_id, workflow_state)
-        _run_experiment_a_workflow(context, run_id, trace_id, workflow_state)
-        _run_experiment_d_workflow(context, run_id, trace_id, workflow_state)
+        config = _load_config(run_id)
+        if _is_repair_run(config):
+            _run_repair_study1(context, run_id, trace_id, workflow_state, config)
+            if bool(config.get("rebuild_downstream")):
+                _run_study2(context, run_id, trace_id, workflow_state)
+                _run_experiment_a_workflow(context, run_id, trace_id, workflow_state)
+                _run_experiment_d_workflow(context, run_id, trace_id, workflow_state)
+        else:
+            _run_study1(context, run_id, trace_id, workflow_state)
+            _run_study2(context, run_id, trace_id, workflow_state)
+            _run_experiment_a_workflow(context, run_id, trace_id, workflow_state)
+            _run_experiment_d_workflow(context, run_id, trace_id, workflow_state)
         _run_report(context, run_id, trace_id, workflow_state)
 
         final_state = (

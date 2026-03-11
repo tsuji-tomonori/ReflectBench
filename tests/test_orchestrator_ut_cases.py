@@ -283,6 +283,69 @@ def test_row_result_counts_returns_small_summary(mod):
     assert counts == {"row_count": 2, "invalid_count": 1}
 
 
+def test_prepare_repair_study1_writes_manifest_and_seeded_output(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174031"
+    config = {
+        "repair_seed_key": f"runs/{run_id}/repair/seed.jsonl",
+        "repair_mode": "renormalize",
+        "shard_size": 500,
+    }
+    seed_rows = [
+        {
+            "record_id": "rec-1",
+            "model_id": "model-a",
+            "manifest_row": {
+                "record_id": "rec-1",
+                "run_id": run_id,
+                "phase": "study1",
+                "model_id": "model-a",
+                "temperature": 0.9,
+                "prompt_type": "FACTUAL",
+                "target": "x",
+                "loop_index": 0,
+            },
+            "invalid_output": {"recordId": "rec-1", "error": {"errorMessage": "parse failed"}},
+        }
+    ]
+
+    with (
+        patch.object(mod, "_s3_get_jsonl", return_value=seed_rows),
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+    ):
+        result = mod._prepare_repair_study1(run_id, config)
+
+    assert result == {"target_count": 1}
+    assert put_jsonl.call_count == 2
+
+
+def test_build_merged_study1_rows_for_repair_replaces_repaired_records(mod):
+    repair_rows = [
+        {"record_id": "rec-2", "model_id": "model-a"},
+        {"record_id": "rec-3", "model_id": "model-b"},
+    ]
+    config = {"parent_run_id": "123e4567-e89b-42d3-a456-426614174000"}
+
+    with (
+        patch.object(
+            mod,
+            "_load_normalized_rows",
+            return_value=[
+                {"record_id": "rec-1", "model_id": "model-a"},
+                {"record_id": "rec-2", "model_id": "model-a"},
+            ],
+        ),
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+    ):
+        merged = mod._build_merged_study1_rows_for_repair(
+            "123e4567-e89b-42d3-a456-426614174031",
+            config,
+            repair_rows,
+        )
+
+    assert [row["record_id"] for row in merged] == ["rec-1", "rec-2", "rec-3"]
+    put_jsonl.assert_called_once()
+
+
 def test_submit_batch_jobs_retries_once_per_shard(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174002"
     manifest_key = f"runs/{run_id}/manifests/study1/model-a/part-00001.jsonl"
@@ -562,6 +625,7 @@ def test_write_reports_outputs_required_artifacts(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174003"
     with (
         patch.object(mod, "_load_normalized_rows") as load_rows,
+        patch.object(mod, "_load_config", return_value={}),
         patch.object(mod.s3, "put_object") as put_object,
         patch.object(mod, "_s3_put_json") as put_json,
     ):

@@ -17,7 +17,14 @@ def mod():
     return importlib.import_module("app.list_runs.handler")
 
 
-def _scan_item(run_id: str, created_at: str, *, artifact_index_key: str | None = None) -> dict:
+def _scan_item(
+    run_id: str,
+    created_at: str,
+    *,
+    artifact_index_key: str | None = None,
+    parent_run_id: str | None = None,
+    repair_mode: str | None = None,
+) -> dict:
     item = {
         "run_id": {"S": run_id},
         "phase": {"S": "STUDY1"},
@@ -36,6 +43,19 @@ def _scan_item(run_id: str, created_at: str, *, artifact_index_key: str | None =
     }
     if artifact_index_key is not None:
         item["artifact_index_key"] = {"S": artifact_index_key}
+    if parent_run_id is not None:
+        item["parent_run_id"] = {"S": parent_run_id}
+        item["repair_phase"] = {"S": "study1"}
+        item["repair_scope"] = {"S": "invalid_only"}
+        item["repair_mode"] = {"S": repair_mode or "rerun"}
+        item["rebuild_downstream"] = {"BOOL": True}
+        item["source_invalid_keys"] = {
+            "L": [
+                {
+                    "S": f"runs/{parent_run_id}/invalid/study1/model-a/invalid.jsonl",
+                }
+            ]
+        }
     return item
 
 
@@ -54,6 +74,8 @@ def test_returns_runs_sorted_with_s3_status_and_next_token(mod):
         "123e4567-e89b-42d3-a456-426614174002",
         "2026-03-06T00:00:00+00:00",
         artifact_index_key="runs/123e4567-e89b-42d3-a456-426614174002/reports/artifact_index.json",
+        parent_run_id="123e4567-e89b-42d3-a456-426614174000",
+        repair_mode="rerun",
     )
     older = _scan_item(
         "123e4567-e89b-42d3-a456-426614174001",
@@ -108,6 +130,10 @@ def test_returns_runs_sorted_with_s3_status_and_next_token(mod):
     assert body["total_count"] == 2
     assert body["next_token"] is not None
     assert body["runs"][0]["run_id"] == "123e4567-e89b-42d3-a456-426614174002"
+    assert body["runs"][0]["lineage"] == {
+        "parent_run_id": "123e4567-e89b-42d3-a456-426614174000"
+    }
+    assert body["runs"][0]["repair"]["mode"] == "rerun"
     assert body["runs"][0]["s3_status"]["config_exists"] is True
     assert body["runs"][0]["s3_status"]["artifact_index_exists"] is True
     assert body["runs"][0]["s3_status"]["reports"]["count"] == 1

@@ -240,6 +240,28 @@ class ExperimentStack(Stack):
             )
         )
 
+        repair_run_fn = lambda_.Function(
+            self,
+            "RepairRunFn",
+            function_name="repair_run_fn",
+            runtime=lambda_.Runtime.PYTHON_3_13,
+            handler="app.repair_run.handler.handler",
+            code=lambda_code,
+            timeout=Duration.seconds(30),
+            environment={
+                "TABLE_NAME": run_control_table.table_name,
+                "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
+                "ORCHESTRATOR_ARN": orchestrator_alias.function_arn,
+                "METRIC_NAMESPACE": "ReflectBench/Runs",
+            },
+        )
+        repair_run_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+            )
+        )
+
         status_fn = lambda_.Function(
             self,
             "StatusFn",
@@ -283,19 +305,23 @@ class ExperimentStack(Stack):
             timeout=Duration.seconds(30),
             environment={
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
+                "TABLE_NAME": run_control_table.table_name,
             },
         )
 
         run_control_table.grant_read_write_data(start_run_fn)
+        run_control_table.grant_read_write_data(repair_run_fn)
         run_control_table.grant_read_write_data(orchestrator_fn)
         run_control_table.grant_read_data(status_fn)
         run_control_table.grant_read_data(list_runs_fn)
         artifacts_bucket.grant_read_write(start_run_fn)
+        artifacts_bucket.grant_read_write(repair_run_fn)
         artifacts_bucket.grant_read_write(orchestrator_fn)
         artifacts_bucket.grant_read(status_fn)
         artifacts_bucket.grant_read(list_runs_fn)
         artifacts_bucket.grant_read(artifacts_fn)
         orchestrator_alias.grant_invoke(start_run_fn)
+        orchestrator_alias.grant_invoke(repair_run_fn)
 
         notification_topic = None
         if enable_notifications:
@@ -327,6 +353,13 @@ class ExperimentStack(Stack):
             methods=[apigwv2.HttpMethod.GET],
             integration=apigwv2_integrations.HttpLambdaIntegration(
                 "StatusIntegration", handler=status_fn
+            ),
+        )
+        http_api.add_routes(
+            path="/runs/{run_id}/repairs",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=apigwv2_integrations.HttpLambdaIntegration(
+                "RepairRunIntegration", handler=repair_run_fn
             ),
         )
         http_api.add_routes(

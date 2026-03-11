@@ -182,6 +182,8 @@ pyrightconfig.json
 [Ll]ib64
 [Ll]ocal
 [Ss]cripts
+!scripts/
+!scripts/validate_vault.py
 pyvenv.cfg
 pip-selfcheck.json
 

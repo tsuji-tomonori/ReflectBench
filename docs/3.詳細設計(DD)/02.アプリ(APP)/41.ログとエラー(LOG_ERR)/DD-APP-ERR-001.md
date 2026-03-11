@@ -3,11 +3,11 @@ id: DD-APP-ERR-001
 title: ログ・エラー処理詳細
 doc_type: エラー詳細
 phase: DD
-version: 1.0.0
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-11'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -45,6 +45,7 @@ tags:
 
 ## 失敗時動作
 - `validation`: `400` または `invalid/` へ退避して継続。
+- repair API の `validation` には、親run未終端、対象 invalid 不在、重複 repair 要求を含める。
 - `dependency`: backoff 再試行後、上限到達で `FAILED`。
 - `timeout`: step を中断し `last_error` を更新。
 - `internal`: 即時失敗とし調査用コンテキストを記録。
@@ -54,4 +55,5 @@ tags:
 - 可観測性メトリクスとエラー分類が矛盾しない。
 
 ## 変更履歴
+- 2026-03-11: repair API 固有の validation エラー条件を追記 [[RQ-RDR-003]]
 - 2026-02-28: 初版作成（ログ相関キーとエラー分類規約を定義） [[BD-SYS-ADR-001]]

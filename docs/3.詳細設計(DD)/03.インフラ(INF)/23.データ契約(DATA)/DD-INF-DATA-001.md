@@ -3,11 +3,11 @@ id: DD-INF-DATA-001
 title: runデータ契約詳細
 doc_type: データ契約
 phase: DD
-version: 1.2.0
+version: 1.3.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-06'
+updated: '2026-03-11'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -19,6 +19,8 @@ related:
   - '[[RQ-FR-011]]'
   - '[[RQ-FR-013]]'
   - '[[RQ-FR-014]]'
+  - '[[RQ-FR-015]]'
+  - '[[RQ-FR-016]]'
   - '[[RQ-GL-012]]'
 tags:
   - llm-temp-introspection
@@ -51,6 +53,13 @@ tags:
 | `shard_size` | integer | Yes | 初期値 `500` |
 | `poll_interval_sec` | integer | Yes | 初期値 `180` |
 | `created_at` | string(datetime) | Yes | UTC ISO8601 |
+| `parent_run_id` | string | No | repair run の親run ID |
+| `repair_phase` | string | No | `study1` |
+| `repair_scope` | string | No | `invalid_only` |
+| `repair_mode` | string | No | `renormalize/rerun` |
+| `rebuild_downstream` | boolean | No | 下流再構築有無 |
+| `source_invalid_keys` | string[] | No | 採用した parent invalid キー |
+| `repair_seed_key` | string | No | child repair run の seed JSONL キー |
 
 ### `RunStatus`
 | フィールド | 型 | 必須 | 説明 |
@@ -66,6 +75,8 @@ tags:
 | `execution_name` | string\|null | No | durable execution 名 |
 | `durable_execution_arn` | string\|null | No | durable execution ARN |
 | `artifact_index_key` | string\|null | No | 成果物索引キー |
+| `lineage` | object\|null | No | `parent_run_id` |
+| `repair` | object\|null | No | repair 条件と `source_invalid_keys` |
 
 ### `RunListItem`
 | フィールド | 型 | 必須 | 説明 |
@@ -81,6 +92,8 @@ tags:
 | `finished_at` | string(datetime)\|null | No | 実行完了 |
 | `execution_name` | string\|null | No | durable execution 名 |
 | `durable_execution_arn` | string\|null | No | durable execution ARN |
+| `lineage` | object\|null | No | `parent_run_id` |
+| `repair` | object\|null | No | repair 条件と `source_invalid_keys` |
 | `s3_status` | object | Yes | S3 状況サマリ |
 
 ### `RunS3Status`
@@ -107,6 +120,12 @@ tags:
 | `execution_name` | string\|null | No | durable execution 名 |
 | `durable_execution_arn` | string\|null | No | durable execution ARN |
 | `artifact_index_key` | string\|null | No | reports/normalized/invalid の索引キー |
+| `parent_run_id` | string | No | 親run ID |
+| `repair_phase` | string | No | `study1` |
+| `repair_scope` | string | No | `invalid_only` |
+| `repair_mode` | string | No | `renormalize/rerun` |
+| `rebuild_downstream` | boolean | No | 下流再構築有無 |
+| `source_invalid_keys` | string[] | No | 採用した parent invalid キー |
 | `updated_at` | string(datetime) | Yes | 最終更新時刻 |
 
 ### `Study1Record`
@@ -155,6 +174,7 @@ tags:
 
 ## S3 格納契約
 - `runs/{run_id}/config.json`
+- `runs/{run_id}/repair/seed.jsonl`
 - `runs/{run_id}/manifests/{phase}/{model}/part-xxxxx.jsonl`
 - `runs/{run_id}/batch-input/{phase}/{model}/part-xxxxx.jsonl`
 - `runs/{run_id}/batch-output/{phase}/{model}/...`
@@ -177,6 +197,8 @@ tags:
 | `invalid_counts` | object | [[RQ-GL-003|phase]]別 invalid 件数 |
 | `excluded_reasons` | object | 集計除外理由 |
 | `estimated_model_cost_usd` | number | 推定モデル費 |
+| `lineage` | object\|null | parent/child 関係 |
+| `repair` | object\|null | repair 条件と `source_invalid_keys` |
 
 ## 受入条件
 - `batch-input/` 行は `recordId` と `modelInput.messages` を必須とし、欠落行は submit 前に検出される。
@@ -187,6 +209,7 @@ tags:
 - 同一条件再実行で `record_id` が一致する。
 
 ## 変更履歴
+- 2026-03-11: repair run 用の lineage/repair 項目と `repair/seed.jsonl` を追記 [[RQ-RDR-003]]
 - 2026-03-06: `RunListItem` / `RunS3Status` と `artifact_index.json` を追記 [[DD-INF-API-001]]
 - 2026-03-02: API x phase x CRUD の正本参照先を [[DD-INF-API-001]] に明記 [[RQ-FR-004]]
 - 2026-03-02: `batch-input` 契約、`modelInput.messages` 必須、`recordId` 再結合の正規化契約を追記 [[RQ-FR-006]]

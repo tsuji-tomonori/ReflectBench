@@ -21,6 +21,51 @@ def _n(item: dict, key: str, default: int = 0) -> int:
     return int(item[key]["N"])
 
 
+def _b(item: dict, key: str) -> bool | None:
+    if key not in item:
+        return None
+    return item[key].get("BOOL")
+
+
+def _ls(item: dict, key: str) -> list[str]:
+    values = item.get(key, {}).get("L", [])
+    return [entry.get("S", "") for entry in values if entry.get("S")]
+
+
+def _lineage_body(item: dict) -> dict | None:
+    parent_run_id = item.get("parent_run_id", {}).get("S")
+    if not parent_run_id:
+        return None
+    return {
+        "parent_run_id": parent_run_id,
+    }
+
+
+def _repair_body(item: dict) -> dict | None:
+    repair_phase = item.get("repair_phase", {}).get("S")
+    repair_scope = item.get("repair_scope", {}).get("S")
+    repair_mode = item.get("repair_mode", {}).get("S")
+    rebuild_downstream = _b(item, "rebuild_downstream")
+    source_invalid_keys = _ls(item, "source_invalid_keys")
+
+    if (
+        repair_phase is None
+        and repair_scope is None
+        and repair_mode is None
+        and rebuild_downstream is None
+        and not source_invalid_keys
+    ):
+        return None
+
+    return {
+        "phase": repair_phase,
+        "scope": repair_scope,
+        "mode": repair_mode,
+        "rebuild_downstream": rebuild_downstream,
+        "source_invalid_keys": source_invalid_keys,
+    }
+
+
 def _enrich_from_durable_execution(item: dict, body: dict) -> None:
     durable_execution_arn = item.get("durable_execution_arn", {}).get("S")
     if not durable_execution_arn:
@@ -110,6 +155,8 @@ def handler(event, _context):
         "execution_name": item.get("execution_name", {}).get("S"),
         "durable_execution_arn": item.get("durable_execution_arn", {}).get("S"),
         "artifact_index_key": item.get("artifact_index_key", {}).get("S"),
+        "lineage": _lineage_body(item),
+        "repair": _repair_body(item),
     }
 
     if "last_error" in item and "M" in item["last_error"]:

@@ -3,11 +3,11 @@ id: DD-APP-API-001
 title: run制御APIアプリ実装詳細
 doc_type: API詳細
 phase: DD
-version: 1.1.0
+version: 1.2.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-06'
+updated: '2026-03-11'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -18,6 +18,8 @@ related:
   - '[[RQ-FR-001]]'
   - '[[RQ-FR-003]]'
   - '[[RQ-FR-004]]'
+  - '[[RQ-FR-015]]'
+  - '[[RQ-FR-016]]'
 tags:
   - llm-temp-introspection
   - DD
@@ -42,19 +44,30 @@ tags:
 1. `run_id` 形式を検証する。
 2. DynamoDB から `RunStatus` を取得し [[RQ-GL-003|phase]]/state/progress を整形する。
 3. `last_error` は欠損時 `null` を返す。
-4. `durable_execution_arn` がある場合のみ durable execution 状態を補強する。
+4. `parent_run_id` / repair 条件がある場合は `lineage` / `repair` へ整形する。
+5. `durable_execution_arn` がある場合のみ durable execution 状態を補強する。
+
+### `POST /runs/{run_id}/repairs`
+1. path の `run_id` を親run IDとして検証する。
+2. request を `RepairRunCreateRequest` へパースし、初期スコープ（`phase=study1`, `scope=invalid_only`, `mode=renormalize|rerun`）を検証する。
+3. 親runの状態を確認し、終端状態以外は `409` を返す。
+4. 親runの `invalid/study1` と `manifests/study1` を読み、対象 invalid を `repair/seed.jsonl` へ固定化する。
+5. 同一親run + 同一 repair 条件の既存 child repair run がある場合は `409` を返す。
+6. 新規時のみ child run の `RunConfig` と `RunStatus(QUEUED)` を保存し、durable 起動を要求する。
 
 ### `GET /runs`
 1. `limit` と `next_token` を検証する。
 2. DynamoDB から idempotency 行を除いた run summary を走査する。
 3. `created_at` 降順へ整列し、ページング対象の run を決定する。
-4. 各 run の `artifact_index.json` または S3 prefix を読み、S3 状況サマリを付加する。
-5. `runs[]`, `returned_count`, `total_count`, `next_token` を返す。
+4. 各 run の `lineage` / `repair` メタデータを整形する。
+5. 各 run の `artifact_index.json` または S3 prefix を読み、S3 状況サマリを付加する。
+6. `runs[]`, `returned_count`, `total_count`, `next_token` を返す。
 
 ### `GET /runs/{run_id}/artifacts`
 1. S3 の reports/normalized/invalid prefix を列挙する。
-2. key 一覧をソートして返す。
-3. 空の場合も `200` + 空配列で返す。
+2. DynamoDB 上の `lineage` / `repair` メタデータを付加する。
+3. key 一覧をソートして返す。
+4. 空の場合も `200` + 空配列で返す。
 
 ## バリデーション規約
 - 構文検証 -> 業務検証 -> 競合検証の順で評価する。
@@ -64,8 +77,10 @@ tags:
 ## 受入条件
 - 4 API すべてで固定制約とエラー契約が一貫している。
 - 同一 `idempotency_key` の再送で重複起動が発生しない。
+- repair run で parent/child 関係と repair 条件が状態/成果物APIから把握できる。
 - run 一覧APIから run_id と S3 状況が把握できる。
 
 ## 変更履歴
+- 2026-03-11: repair run API の受付手順と lineage/repair 整形処理を追記 [[RQ-RDR-003]]
 - 2026-03-06: `GET /runs` の処理順を追加し、status の durable 補強処理を追記 [[DD-INF-API-001]]
 - 2026-02-28: 初版作成（[[RQ-GL-002|run]]制御APIのアプリ実装規約を定義） [[BD-SYS-ADR-001]]

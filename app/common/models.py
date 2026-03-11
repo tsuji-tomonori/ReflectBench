@@ -49,6 +49,44 @@ class RunCreateRequest(BaseModel):
         return deduped
 
 
+class RepairRunCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    phase: Literal["study1"]
+    scope: Literal["invalid_only"]
+    mode: Literal["renormalize", "rerun"]
+    models: list[str] | None = Field(default=None, min_length=1)
+    record_ids: list[str] | None = Field(default=None, min_length=1)
+    rebuild_downstream: bool = False
+
+    @field_validator("models")
+    @classmethod
+    def validate_models(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        deduped = list(dict.fromkeys(value))
+        unknown = sorted(set(deduped) - set(ALL_MODELS))
+        if unknown:
+            raise ValueError(f"unsupported models: {', '.join(unknown)}")
+        batch_unsupported = [model for model in deduped if model in BATCH_UNSUPPORTED_MODELS]
+        if batch_unsupported:
+            details = "; ".join(
+                f"{model}: {BATCH_UNSUPPORTED_MODELS[model]}" for model in batch_unsupported
+            )
+            raise ValueError(f"batch-unsupported models: {details}")
+        return deduped
+
+    @field_validator("record_ids")
+    @classmethod
+    def validate_record_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        deduped = list(dict.fromkeys(value))
+        if any(not record_id for record_id in deduped):
+            raise ValueError("record_ids must not contain empty value")
+        return deduped
+
+
 class Study1BatchRow(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

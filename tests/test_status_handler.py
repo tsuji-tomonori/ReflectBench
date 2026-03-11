@@ -104,6 +104,55 @@ def test_returns_retry_count_and_last_error(mod):
     }
 
 
+def test_returns_lineage_and_repair_metadata(mod):
+    db_item = {
+        "Item": {
+            "run_id": {"S": "123e4567-e89b-42d3-a456-426614174010"},
+            "phase": {"S": "REPORT"},
+            "step": {"S": "FINALIZE"},
+            "state": {"S": "SUCCEEDED"},
+            "parent_run_id": {"S": "123e4567-e89b-42d3-a456-426614174000"},
+            "repair_phase": {"S": "study1"},
+            "repair_scope": {"S": "invalid_only"},
+            "repair_mode": {"S": "rerun"},
+            "rebuild_downstream": {"BOOL": True},
+            "source_invalid_keys": {
+                "L": [
+                    {
+                        "S": (
+                            "runs/123e4567-e89b-42d3-a456-426614174000/"
+                            "invalid/study1/model-a/invalid.jsonl"
+                        )
+                    }
+                ]
+            },
+        }
+    }
+    with (
+        patch.object(mod.dynamodb, "get_item", return_value=db_item),
+        patch.object(mod, "_enrich_from_durable_execution"),
+    ):
+        res = mod.handler(
+            {"pathParameters": {"run_id": "123e4567-e89b-42d3-a456-426614174010"}},
+            None,
+        )
+
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 200
+    assert body["lineage"] == {
+        "parent_run_id": "123e4567-e89b-42d3-a456-426614174000",
+    }
+    assert body["repair"] == {
+        "phase": "study1",
+        "scope": "invalid_only",
+        "mode": "rerun",
+        "rebuild_downstream": True,
+        "source_invalid_keys": [
+            "runs/123e4567-e89b-42d3-a456-426614174000/invalid/study1/model-a/invalid.jsonl"
+        ],
+    }
+
+
 def test_enriches_status_from_durable_execution(mod):
     item = {
         "durable_execution_arn": {

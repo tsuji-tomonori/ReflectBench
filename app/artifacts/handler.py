@@ -10,7 +10,9 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 s3 = boto3.client("s3")
+dynamodb = boto3.client("dynamodb")
 ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
+TABLE_NAME = os.environ.get("TABLE_NAME")
 
 
 def _list_keys(prefix: str) -> list[str]:
@@ -34,6 +36,68 @@ def _run_exists(run_id: str) -> bool:
         Bucket=ARTIFACTS_BUCKET, Prefix=f"runs/{run_id}/config.json", MaxKeys=1
     )
     return bool(res.get("Contents"))
+
+
+def _b(item: dict, key: str) -> bool | None:
+    if key not in item:
+        return None
+    return item[key].get("BOOL")
+
+
+def _ls(item: dict, key: str) -> list[str]:
+    values = item.get(key, {}).get("L", [])
+    return [entry.get("S", "") for entry in values if entry.get("S")]
+
+
+def _load_run_item(run_id: str) -> dict | None:
+    if not TABLE_NAME:
+        return None
+    res = dynamodb.get_item(
+        TableName=TABLE_NAME,
+        Key={"run_id": {"S": run_id}},
+        ConsistentRead=True,
+    )
+    item = res.get("Item")
+    if not item or item.get("kind", {}).get("S") == "IDEMPOTENCY":
+        return None
+    return item
+
+
+def _lineage_body(item: dict | None) -> dict | None:
+    if not item:
+        return None
+    parent_run_id = item.get("parent_run_id", {}).get("S")
+    if not parent_run_id:
+        return None
+    return {"parent_run_id": parent_run_id}
+
+
+def _repair_body(item: dict | None) -> dict | None:
+    if not item:
+        return None
+
+    repair_phase = item.get("repair_phase", {}).get("S")
+    repair_scope = item.get("repair_scope", {}).get("S")
+    repair_mode = item.get("repair_mode", {}).get("S")
+    rebuild_downstream = _b(item, "rebuild_downstream")
+    source_invalid_keys = _ls(item, "source_invalid_keys")
+
+    if (
+        repair_phase is None
+        and repair_scope is None
+        and repair_mode is None
+        and rebuild_downstream is None
+        and not source_invalid_keys
+    ):
+        return None
+
+    return {
+        "phase": repair_phase,
+        "scope": repair_scope,
+        "mode": repair_mode,
+        "rebuild_downstream": rebuild_downstream,
+        "source_invalid_keys": source_invalid_keys,
+    }
 
 
 def handler(event, _context):
@@ -68,10 +132,13 @@ def handler(event, _context):
         )
 
     base = f"runs/{run_id}/"
+    item = _load_run_item(run_id)
     body = {
         "run_id": run_id,
         "reports": _list_keys(base + "reports/"),
         "normalized": _list_keys(base + "normalized/"),
         "invalid": _list_keys(base + "invalid/"),
+        "lineage": _lineage_body(item),
+        "repair": _repair_body(item),
     }
     return json_response(200, body, trace_id)

@@ -34,6 +34,17 @@ def _s(item: dict, key: str) -> str | None:
     return item[key].get("S")
 
 
+def _b(item: dict, key: str) -> bool | None:
+    if key not in item:
+        return None
+    return item[key].get("BOOL")
+
+
+def _ls(item: dict, key: str) -> list[str]:
+    values = item.get(key, {}).get("L", [])
+    return [entry.get("S", "") for entry in values if entry.get("S")]
+
+
 def _parse_limit(raw: str | None) -> int:
     if raw is None or raw == "":
         return DEFAULT_LIMIT
@@ -186,6 +197,26 @@ def _build_s3_status(item: dict) -> dict:
 
 def _build_run(item: dict) -> dict:
     progress = item.get("progress", {}).get("M", {})
+    parent_run_id = _s(item, "parent_run_id")
+    source_invalid_keys = _ls(item, "source_invalid_keys")
+    repair = None
+    if any(
+        value is not None
+        for value in (
+            _s(item, "repair_phase"),
+            _s(item, "repair_scope"),
+            _s(item, "repair_mode"),
+            _b(item, "rebuild_downstream"),
+        )
+    ) or source_invalid_keys:
+        repair = {
+            "phase": _s(item, "repair_phase"),
+            "scope": _s(item, "repair_scope"),
+            "mode": _s(item, "repair_mode"),
+            "rebuild_downstream": _b(item, "rebuild_downstream"),
+            "source_invalid_keys": source_invalid_keys,
+        }
+
     return {
         "run_id": _s(item, "run_id"),
         "phase": _s(item, "phase") or "UNKNOWN",
@@ -202,6 +233,8 @@ def _build_run(item: dict) -> dict:
         "finished_at": _s(item, "finished_at"),
         "execution_name": _s(item, "execution_name"),
         "durable_execution_arn": _s(item, "durable_execution_arn"),
+        "lineage": {"parent_run_id": parent_run_id} if parent_run_id else None,
+        "repair": repair,
         "s3_status": _build_s3_status(item),
     }
 
