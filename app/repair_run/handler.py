@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from app.common.api import is_valid_run_id, json_response, problem_response, trace_id_from_event
+from app.common.batch import plan_batch_shards
 from app.common.models import RepairRunCreateRequest
 from app.orchestrator import projection
 
@@ -194,6 +195,24 @@ def _build_seed_rows(parent_run_id: str, request: RepairRunCreateRequest) -> tup
         if matched_in_key:
             continue
     return seed_rows, list(dict.fromkeys(source_invalid_keys))
+
+
+def _validate_rerun_seed_rows(seed_rows: list[dict], shard_size: int) -> None:
+    grouped_counts: dict[str, int] = {}
+    for row in seed_rows:
+        model_id = str(row.get("model_id") or "").strip()
+        if not model_id:
+            raise ValueError("repair seed row is missing model_id")
+        grouped_counts[model_id] = grouped_counts.get(model_id, 0) + 1
+
+    for model_id, count in grouped_counts.items():
+        try:
+            plan_batch_shards(count, shard_size)
+        except ValueError as exc:
+            raise ValueError(
+                "repair rerun targets for "
+                f"model_id={model_id} cannot satisfy Bedrock Batch shard constraints: {exc}"
+            ) from exc
 
 
 def _scan_runs() -> list[dict]:
@@ -429,6 +448,20 @@ def handler(event, _context):
             step=step,
             trace_id=trace_id,
         )
+
+    if request.mode == "rerun":
+        try:
+            _validate_rerun_seed_rows(seed_rows, int(parent_config.get("shard_size", 500)))
+        except ValueError as exc:
+            return problem_response(
+                status_code=409,
+                code="REPAIR_BATCH_CONSTRAINT",
+                message=str(exc),
+                category="validation",
+                retryable=False,
+                step=step,
+                trace_id=trace_id,
+            )
 
     accepted_at = _now_iso()
     run_id = str(uuid.uuid4())

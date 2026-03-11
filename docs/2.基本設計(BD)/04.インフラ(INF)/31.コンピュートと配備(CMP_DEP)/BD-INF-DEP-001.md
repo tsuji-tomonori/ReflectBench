@@ -54,6 +54,7 @@ tags:
 - 長時間制御: `orchestrator_durable_fn` を Lambda Durable Functions 前提で作成し、alias `live` 経由で起動する。
 - モデル固定: `apac.amazon.nova-micro-v1:0`, `google.gemma-3-12b-it`, `mistral.ministral-3-8b-instruct`, `qwen.qwen3-32b-v1:0`。
 - フェーズ境界: Study1 -> Study2(within/across) -> 実験A(edit/predict) -> 実験D([[RQ-GL-010|blind]]/[[RQ-GL-011|wrong-label]]) -> report。
+- Bedrock Batch へ投入する [[RQ-GL-004|shard]] は 1 job あたり `100..500 records` を保証し、末尾不足は再配分、成立しない件数は submit 前 validation error とする。
 
 ## 全体構成
 ```text
@@ -115,6 +116,7 @@ Client (Admin only)
 - 管理者が run 一覧と S3 保存状況を API だけで確認できる。
 
 ## 変更履歴
+- 2026-03-12: Bedrock Batch shard の `100..500` 保証と submit 前 validation 方針を追記 [[DD-INF-DEP-002]]
 - 2026-03-06: `list_runs_fn` と `GET /runs` の運用APIを追加 [[DD-INF-API-001]]
 - 2026-03-06: `orchestrator_durable_fn:live` と projection ベースの durable 構成へ更新 [[DD-INF-DEP-001]]
 - 2026-02-28: DD-INF/DD-APP 正本分離に合わせ reverse trace を拡張 [[BD-SYS-ADR-001]]

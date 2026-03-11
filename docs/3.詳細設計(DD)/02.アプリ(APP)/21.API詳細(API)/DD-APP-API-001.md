@@ -52,8 +52,9 @@ tags:
 2. request を `RepairRunCreateRequest` へパースし、初期スコープ（`phase=study1`, `scope=invalid_only`, `mode=renormalize|rerun`）を検証する。
 3. 親runの状態を確認し、終端状態以外は `409` を返す。
 4. 親runの `invalid/study1` と `manifests/study1` を読み、対象 invalid を `repair/seed.jsonl` へ固定化する。
-5. 同一親run + 同一 repair 条件の既存 child repair run がある場合は `409` を返す。
-6. 新規時のみ child run の `RunConfig` と `RunStatus(QUEUED)` を保存し、durable 起動を要求する。
+5. `mode=rerun` の場合は seed 行件数を model 単位で集計し、親runの `shard_size` で `100..shard_size` に分割不能なら `409` を返す。
+6. 同一親run + 同一 repair 条件の既存 child repair run がある場合は `409` を返す。
+7. 新規時のみ child run の `RunConfig` と `RunStatus(QUEUED)` を保存し、durable 起動を要求する。
 
 ### `GET /runs`
 1. `limit` と `next_token` を検証する。
@@ -81,6 +82,7 @@ tags:
 - run 一覧APIから run_id と S3 状況が把握できる。
 
 ## 変更履歴
+- 2026-03-12: repair rerun の Batch 制約検証を追加 [[DD-INF-DEP-002]]
 - 2026-03-11: repair run API の受付手順と lineage/repair 整形処理を追記 [[RQ-RDR-003]]
 - 2026-03-06: `GET /runs` の処理順を追加し、status の durable 補強処理を追記 [[DD-INF-API-001]]
 - 2026-02-28: 初版作成（[[RQ-GL-002|run]]制御APIのアプリ実装規約を定義） [[BD-SYS-ADR-001]]

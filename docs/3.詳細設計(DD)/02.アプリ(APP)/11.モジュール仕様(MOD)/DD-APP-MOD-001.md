@@ -59,13 +59,16 @@ tags:
 - `across_model` は generator と異なる predictor のみを対象にする。
 - 実験Aは `PromptType.NORMAL` サンプルのみを edit 対象にし、`info_plus` / `info_minus` を予測する。
 - 実験D `wrong_label` は `FACTUAL <-> CRAZY` swap のみを対象とし、`NORMAL` は除外する。
+- Bedrock Batch へ投入する manifest は model/phase 単位で `100..shard_size` を満たすように再配分し、成立しない件数は validation error とする。
 - repair run は `study1` の `invalid_only` に限定し、`renormalize` は parent invalid の raw 出力再正規化、`rerun` は child manifest 再投入で処理する。
+- repair run の `rerun` は `repair_api` が seed 行件数を model 単位で検証し、親runの `shard_size` で Batch 制約を満たせない場合は child run を起動しない。
 
 ## 受入条件
 - モジュール単位で単体テスト可能な責務分離になっている。
 - retry 時に `orchestration` が同一 `record_id` で再処理できる。
 
 ## 変更履歴
+- 2026-03-12: Batch shard 再配分と repair rerun の事前検証を追記 [[DD-INF-DEP-002]]
 - 2026-02-28: 実験詳細ルール（self条件、A/D対象条件）を追記 [[RQ-RDR-002]]
 - 2026-03-11: `repair_api` と repair workflow / downstream rebuild 分岐を追記 [[RQ-RDR-003]]
 - 2026-02-28: 総論のアプリ処理フローに合わせて処理順序を具体化（idempotency/retry/終状態遷移を明確化） [[DD-APP-OVR-001]]

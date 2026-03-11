@@ -3,11 +3,11 @@ id: UT-CASE-BE-007
 title: POST /runs/{run_id}/repairs 起動と検証
 doc_type: 単体テストケース
 phase: UT
-version: 1.0.0
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-03-11
-updated: '2026-03-11'
+updated: '2026-03-12'
 up:
   - '[[UT-PLAN-001]]'
   - '[[DD-INF-API-001]]'
@@ -26,7 +26,7 @@ tags:
 
 ## テスト目的
 - 親run終端 + 対象 invalid ありのとき child repair run が受理されることを確認する。
-- 親run未終端、対象 invalid 不在、重複 repair 要求が `409` で拒否されることを確認する。
+- 親run未終端、対象 invalid 不在、重複 repair 要求、`rerun` 件数が Batch 制約に不適合な場合が `409` で拒否されることを確認する。
 
 ## 前提
 - 親runの config / manifest / invalid はモック化する。
@@ -34,7 +34,7 @@ tags:
 
 ## 手順
 1. `phase=study1`, `scope=invalid_only`, `mode=rerun` で repair API を呼ぶ。
-2. 親run未終端、対象 invalid 不在、重複 repair 要求でも呼ぶ。
+2. 親run未終端、対象 invalid 不在、重複 repair 要求、model 単位件数が `100` 未満の `rerun` でも呼ぶ。
 
 ## 期待結果
 - 正常系は `202 Accepted` を返す。
@@ -42,4 +42,5 @@ tags:
 - 異常系は `409 Conflict` を返す。
 
 ## 変更履歴
+- 2026-03-12: repair rerun の Batch 制約不適合を `409` で検証する条件を追加 [[DD-INF-DEP-002]]
 - 2026-03-11: 初版作成 [[RQ-RDR-003]]

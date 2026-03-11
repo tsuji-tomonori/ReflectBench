@@ -49,6 +49,8 @@ tags:
 - 単一環境のみで運用し、環境分割を行わない。
 - 常時開放は行わず、必要時のみ起動して実験を実施する。
 - 冗長化構成は採用せず、障害時は再試行と再実行で復旧する。
+- Bedrock Batch へ送る [[RQ-GL-004|shard]] は `100..500 records` を満たすように末尾を再配分する。
+- model/phase 単位の総件数が `100..shard_size` 制約へ分割不能な場合、Bedrock submit 前に validation error として停止する。
 
 ## コスト見積もり（`plan.md` ベース）
 
@@ -138,6 +140,7 @@ tags:
 - 集計 CSV と source [[RQ-GL-002|run]] の関連が `record_id` で逆引きできる。
 
 ## 変更履歴
+- 2026-03-12: Bedrock Batch shard の再配分と submit 前 validation 条件を追記 [[BD-INF-DEP-001]]
 - 2026-03-01: poll interval の意味を non-blocking 再確認間隔へ明確化 [[DD-INF-DEP-001]]
 - 2026-02-28: `plan.md` ベースのモデル費見積もりと phase 別費用を追加し、RQ-COST トレースを追記 [[RQ-RDR-002]]
 - 2026-02-28: 実験詳細の正本参照先を DD-APP 群へ追加 [[RQ-RDR-002]]

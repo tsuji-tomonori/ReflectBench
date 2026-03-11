@@ -106,6 +106,7 @@ tags:
 | UT-CASE-APP-007 | report | 成果物生成 | 正常records | 5 CSV + `run_manifest.json` |
 | UT-CASE-APP-008 | metrics | 可観測性 | [[RQ-GL-002|run]]完了時 | 必須メトリクス送信 |
 | UT-CASE-APP-009 | error model | 分類 | timeout/dependency | `category/retryable/step` 正常設定 |
+| UT-CASE-APP-010 | orchestration | Bedrock Batch shard 境界 | `550 rows` / `2574 rows` / `74 rows` | 再配分または validation error |
 
 ## 品質ゲート
 - 必須:
@@ -124,11 +125,12 @@ tags:
 4. docs整合チェック（`task docs:guard`）
 
 ## 完了条件
-- `RQ-FR-001..014` の主要受入基準が UT ケースに対応付け済みである。
+- `RQ-FR-001..016` の主要受入基準が UT ケースに対応付け済みである。
 - `RQ-PS-001-01`, `RQ-OBS-001-01`, `RQ-SEC-001-01` の検証観点がケース化されている。
 - 失敗時の再試行/部分成功/エラー記録の挙動が再現可能である。
 
 ## 変更履歴
+- 2026-03-12: Bedrock Batch shard 境界の UT ケースを追加し、完了条件の FR 範囲を更新 [[DD-INF-DEP-002]]
 - 2026-02-28: 静的解析手順に `task app:check`（ruff + mypy）を追加 [[RQ-RDR-002]]
 - 2026-02-28: UTトレーサビリティマトリクス（UT-TRC-001）を追加 [[RQ-RDR-002]]
 - 2026-02-28: ペアワイズ設計文書（UT-PW）を追加し関連リンクを更新 [[RQ-RDR-002]]

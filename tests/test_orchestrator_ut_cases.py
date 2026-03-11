@@ -283,6 +283,52 @@ def test_row_result_counts_returns_small_summary(mod):
     assert counts == {"row_count": 2, "invalid_count": 1}
 
 
+def test_write_batch_sharded_rebalances_tail_below_batch_minimum(mod):
+    rows = [{"record_id": f"rec-{idx}"} for idx in range(550)]
+
+    with patch.object(mod, "_s3_put_jsonl") as put_jsonl:
+        written = mod._write_batch_sharded(
+            "runs/run-1/manifests/study1/model-a",
+            rows,
+            500,
+            step="STUDY1_ENUMERATE",
+            scope="study1/model-a",
+        )
+
+    assert written == 550
+    assert [len(call.args[1]) for call in put_jsonl.call_args_list] == [275, 275]
+
+
+def test_write_batch_sharded_raises_when_rows_cannot_meet_batch_minimum(mod):
+    rows = [{"record_id": f"rec-{idx}"} for idx in range(74)]
+
+    with pytest.raises(mod.PipelineError) as excinfo:
+        mod._write_batch_sharded(
+            "runs/run-1/manifests/study1/model-a",
+            rows,
+            500,
+            step="EXPERIMENT_A_WAIT",
+            scope="experiment_a_predict/model-a",
+        )
+
+    assert excinfo.value.step == "EXPERIMENT_A_WAIT"
+    assert "count=74" in excinfo.value.reason
+
+
+def test_generate_study1_manifests_raises_when_shard_plan_is_infeasible(mod):
+    config = {
+        "models": ["model-a"],
+        "loops": 1,
+        "shard_size": 100,
+    }
+
+    with pytest.raises(mod.PipelineError) as excinfo:
+        mod._generate_study1_manifests("123e4567-e89b-42d3-a456-426614174034", config)
+
+    assert excinfo.value.step == "STUDY1_ENUMERATE"
+    assert "count=165" in excinfo.value.reason
+
+
 def test_prepare_repair_study1_writes_manifest_and_seeded_output(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174031"
     config = {
@@ -316,6 +362,75 @@ def test_prepare_repair_study1_writes_manifest_and_seeded_output(mod):
 
     assert result == {"target_count": 1}
     assert put_jsonl.call_count == 2
+
+
+def test_prepare_repair_study1_rerun_rebalances_manifest_chunks(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174032"
+    config = {
+        "repair_seed_key": f"runs/{run_id}/repair/seed.jsonl",
+        "repair_mode": "rerun",
+        "shard_size": 500,
+    }
+    seed_rows = [
+        {
+            "record_id": f"rec-{idx}",
+            "model_id": "model-a",
+            "manifest_row": {
+                "record_id": f"rec-{idx}",
+                "run_id": run_id,
+                "phase": "study1",
+                "model_id": "model-a",
+                "temperature": 0.9,
+                "prompt_type": "FACTUAL",
+                "target": "x",
+                "loop_index": idx,
+            },
+        }
+        for idx in range(550)
+    ]
+
+    with (
+        patch.object(mod, "_s3_get_jsonl", return_value=seed_rows),
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+    ):
+        result = mod._prepare_repair_study1(run_id, config)
+
+    assert result == {"target_count": 550}
+    assert [len(call.args[1]) for call in put_jsonl.call_args_list] == [275, 275]
+    assert all("repair-part-" in call.args[0] for call in put_jsonl.call_args_list)
+
+
+def test_prepare_repair_study1_rerun_raises_when_model_group_below_batch_minimum(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174033"
+    config = {
+        "repair_seed_key": f"runs/{run_id}/repair/seed.jsonl",
+        "repair_mode": "rerun",
+        "shard_size": 500,
+    }
+    seed_rows = [
+        {
+            "record_id": f"rec-{idx}",
+            "model_id": "model-a",
+            "manifest_row": {
+                "record_id": f"rec-{idx}",
+                "run_id": run_id,
+                "phase": "study1",
+                "model_id": "model-a",
+                "temperature": 0.9,
+                "prompt_type": "FACTUAL",
+                "target": "x",
+                "loop_index": idx,
+            },
+        }
+        for idx in range(74)
+    ]
+
+    with patch.object(mod, "_s3_get_jsonl", return_value=seed_rows):
+        with pytest.raises(mod.PipelineError) as excinfo:
+            mod._prepare_repair_study1(run_id, config)
+
+    assert excinfo.value.step == "STUDY1_ENUMERATE"
+    assert "count=74" in excinfo.value.reason
 
 
 def test_build_merged_study1_rows_for_repair_replaces_repaired_records(mod):
@@ -463,15 +578,15 @@ def test_write_prediction_manifests_groups_rows_by_predictor_model(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174018"
     base_rows = [
         {
-            "source_record_id": "src-1",
+            "source_record_id": f"src-{idx}",
             "generator_model": "g1",
-            "predictor_model": "g1",
             "generated_sentence": "sentence",
             "prompt_type": "FACTUAL",
             "target": "x",
             "expected_label": "HIGH",
             "condition_type": "within",
         }
+        for idx in range(100)
     ]
 
     with patch.object(mod, "_s3_put_jsonl") as put_jsonl:
@@ -483,7 +598,7 @@ def test_write_prediction_manifests_groups_rows_by_predictor_model(mod):
             500,
         )
 
-    assert written == 2
+    assert written == 200
     keys = [call.args[0] for call in put_jsonl.call_args_list]
     assert any("/study2_across/google.gemma-3-12b-it/" in key for key in keys)
     assert any("/study2_across/mistral.ministral-3-8b-instruct/" in key for key in keys)
@@ -492,6 +607,37 @@ def test_write_prediction_manifests_groups_rows_by_predictor_model(mod):
         predictor_models = {row["predictor_model"] for row in rows}
         assert len(predictor_models) == 1
         assert rows[0]["generated_sentence"] == "sentence"
+
+
+def test_write_prediction_manifests_rebalances_experiment_a_predict_tail(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174019"
+    base_rows = [
+        {
+            "source_record_id": f"src-{idx}",
+            "generator_model": "g1",
+            "generated_sentence": "sentence",
+            "prompt_type": "FACTUAL",
+            "target": "x",
+            "expected_label": "HIGH",
+            "info_plus": f"plus-{idx}",
+            "info_minus": f"minus-{idx}",
+        }
+        for idx in range(1287)
+    ]
+
+    with patch.object(mod, "_s3_put_jsonl") as put_jsonl:
+        written = mod._write_prediction_manifests(
+            run_id,
+            "experiment_a_predict",
+            base_rows,
+            ["apac.amazon.nova-micro-v1:0"],
+            500,
+            condition_types=["info_plus", "info_minus"],
+        )
+
+    assert written == 2574
+    assert put_jsonl.call_count == 6
+    assert [len(call.args[1]) for call in put_jsonl.call_args_list] == [429, 429, 429, 429, 429, 429]
 
 
 def test_normalize_study1_parses_batch_wrapper(mod):

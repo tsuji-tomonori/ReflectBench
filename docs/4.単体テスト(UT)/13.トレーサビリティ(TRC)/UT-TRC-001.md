@@ -54,7 +54,7 @@ tags:
 | [[RQ-FR-003]] | status API | [[UT-CASE-BE-004]], [[UT-CASE-BE-005]] |
 | [[RQ-FR-004]] | artifacts API | [[UT-CASE-BE-006]] |
 | [[RQ-FR-005]] | Study1 列挙 | [[UT-CASE-APP-001]] |
-| [[RQ-FR-006]] | Batch 投入 | [[UT-CASE-APP-001]], [[UT-CASE-APP-003]] |
+| [[RQ-FR-006]] | Batch 投入 | [[UT-CASE-APP-001]], [[UT-CASE-APP-003]], [[UT-CASE-APP-010]] |
 | [[RQ-FR-007]] | durable 待機 | [[UT-CASE-APP-001]], [[UT-CASE-APP-002]] |
 | [[RQ-FR-008]] | within/across 分離 | [[UT-CASE-APP-001]] |
 | [[RQ-FR-009]] | 実験A 2段実行 | [[UT-CASE-APP-001]] |
@@ -84,11 +84,13 @@ tags:
 | [[UT-CASE-APP-006]] | ID入力欠落 | [[UT-PW-APP-DATA-001]] |
 | [[UT-CASE-APP-008]] | 監視送信条件 | [[UT-PW-APP-MON-001]] |
 | [[UT-CASE-APP-009]] | エラー分類 | [[UT-PW-APP-ERR-001]] |
+| [[UT-CASE-APP-010]] | Batch shard 境界 | [[UT-PW-APP-ORCH-001]] |
 
 ## カバレッジ確認観点
-- すべての `RQ-FR-001..014` が少なくとも1つ以上の UT-CASE に対応している。
+- すべての `RQ-FR-001..016` が少なくとも1つ以上の UT-CASE に対応している。
 - 3因子以上の分岐を持つ主要観点（API入力、orchestration、data、error、monitoring）が UT-PW で補完されている。
 
 ## 変更履歴
+- 2026-03-12: Bedrock Batch shard 境界の UT 追跡を追加し、FR 範囲表記を更新 [[DD-INF-DEP-002]]
 - 2026-03-11: repair API と lineage/repair 応答の追跡関係を追加 [[RQ-RDR-003]]
 - 2026-02-28: 初版作成（UT-CASE と UT-PW の対応マトリクスを追加） [[RQ-RDR-002]]

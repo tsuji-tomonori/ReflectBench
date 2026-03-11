@@ -47,7 +47,7 @@ tags:
 |---|---|---|---|
 | `loops` | integer | Yes | `10` 固定 |
 | `full_cross` | boolean | Yes | `true` 固定 |
-| `shard_size` | integer | No | `500`（100以上） |
+| `shard_size` | integer | No | `500`（100以上。Batch投入時は `100..shard_size` へ再配分） |
 | `poll_interval_sec` | integer | No | `180` |
 | `editor_model` | string | No | `apac.amazon.nova-micro-v1:0` |
 | `idempotency_key` | string | No | 同値再送時に同一 `run_id` を返す |
@@ -69,7 +69,7 @@ tags:
 |---|---|---|---|
 | `phase` | string | Yes | `study1` 固定 |
 | `scope` | string | Yes | `invalid_only` 固定 |
-| `mode` | string | Yes | `renormalize` or `rerun` |
+| `mode` | string | Yes | `renormalize` or `rerun`（`rerun` は model 単位件数が Batch の `100..shard_size` を満たすこと） |
 | `models` | string[] | No | 対象 invalid を model 単位で絞り込む |
 | `record_ids` | string[] | No | 対象 invalid を record 単位で絞り込む |
 | `rebuild_downstream` | boolean | No | `false` |
@@ -205,7 +205,7 @@ tags:
 ## エラー契約
 - `400 Bad Request`: 入力不正（必須不足、制約違反、`limit` / `next_token` 不正を含む）
 - `404 Not Found`: 未知 `run_id`
-- `409 Conflict`: 重複起動拒否（同一 `idempotency_key` が異条件、repair の親run未終端、対象 invalid 不在、重複 repair 要求）
+- `409 Conflict`: 重複起動拒否（同一 `idempotency_key` が異条件、repair の親run未終端、対象 invalid 不在、重複 repair 要求、repair rerun 件数が Batch 制約に不適合）
 - `500 Internal Server Error`: durable 起動失敗や状態取得失敗
 
 ## 状態遷移
@@ -220,6 +220,7 @@ tags:
 - `GET /runs/{run_id}/artifacts` に 5 CSV + `run_manifest.json` が含まれる。
 
 ## 変更履歴
+- 2026-03-12: Bedrock Batch shard の再配分条件と repair rerun 件数制約を追記 [[DD-INF-DEP-002]]
 - 2026-03-11: `POST /runs/{run_id}/repairs` と lineage/repair 応答項目を追加 [[RQ-RDR-003]]
 - 2026-03-06: `GET /runs` を追加し、run 一覧 + S3 状況サマリの契約を追記 [[DD-INF-DEP-001]]
 - 2026-03-02: S3 IF（API x phase x CRUD）を追記し、APIごとのS3ファイル操作境界を明記 [[RQ-FR-004]]

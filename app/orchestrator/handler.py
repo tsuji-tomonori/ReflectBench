@@ -12,6 +12,7 @@ from collections import Counter
 import boto3
 
 from app.common.api import is_valid_run_id
+from app.common.batch import plan_batch_shards
 from app.common.models import PredictionBatchRow, Study1BatchRow
 from app.orchestrator import projection
 
@@ -1043,19 +1044,59 @@ def _write_sharded(prefix: str, rows: list[dict], shard_size: int) -> int:
     return written
 
 
+def _plan_batch_shards_or_raise(
+    total_rows: int,
+    shard_size: int,
+    *,
+    step: str,
+    scope: str,
+) -> list[int]:
+    try:
+        return plan_batch_shards(total_rows, shard_size)
+    except ValueError as exc:
+        raise PipelineError(
+            step=step,
+            reason=f"{scope} cannot satisfy Bedrock Batch shard constraints: {exc}",
+            retryable=False,
+            category="validation",
+        ) from exc
+
+
+def _write_batch_sharded(
+    prefix: str,
+    rows: list[dict],
+    shard_size: int,
+    *,
+    step: str,
+    scope: str,
+) -> int:
+    written = 0
+    offset = 0
+    for part, chunk_size in enumerate(
+        _plan_batch_shards_or_raise(len(rows), shard_size, step=step, scope=scope),
+        start=1,
+    ):
+        chunk = rows[offset : offset + chunk_size]
+        _s3_put_jsonl(f"{prefix}/part-{part:05d}.jsonl", chunk)
+        written += len(chunk)
+        offset += chunk_size
+    return written
+
+
 def _write_rows_grouped_by_model(
     prefix: str,
     rows: list[dict],
     shard_size: int,
     *,
     model_key: str,
+    step: str,
 ) -> int:
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         model_id = str(row.get(model_key) or "").strip()
         if not model_id:
             raise PipelineError(
-                step="MANIFEST_WRITE",
+                step=step,
                 reason=f"{model_key} is required for {prefix}",
                 retryable=False,
                 category="validation",
@@ -1065,7 +1106,13 @@ def _write_rows_grouped_by_model(
     written = 0
     for model_id, model_rows in grouped.items():
         model_prefix = f"{prefix}/{_encode_model_key(model_id)}"
-        written += _write_sharded(model_prefix, model_rows, shard_size)
+        written += _write_batch_sharded(
+            model_prefix,
+            model_rows,
+            shard_size,
+            step=step,
+            scope=f"{prefix}/{model_id}",
+        )
     return written
 
 
@@ -1173,18 +1220,21 @@ def _prepare_downstream_manifests(run_id: str, rows: list[dict], config: dict) -
             within_rows,
             shard_size,
             model_key="predictor_model",
+            step="STUDY2_PREPARE",
         ),
         "study2_across": _write_rows_grouped_by_model(
             f"runs/{run_id}/manifests/study2_across",
             across_rows,
             shard_size,
             model_key="predictor_model",
+            step="STUDY2_PREPARE",
         ),
         "experiment_a_edit": _write_rows_grouped_by_model(
             f"runs/{run_id}/manifests/experiment_a_edit",
             exp_a_edit_rows,
             shard_size,
             model_key="editor_model",
+            step="STUDY2_PREPARE",
         ),
         "experiment_d_blind": _write_sharded(
             f"runs/{run_id}/manifests/experiment_d_blind", exp_d_blind_rows, shard_size
@@ -1368,6 +1418,7 @@ def _write_prediction_manifests(
         manifest_rows,
         shard_size,
         model_key="predictor_model",
+        step="EXPERIMENT_A_WAIT" if phase == "experiment_a_predict" else "EXPERIMENT_D_SUBMIT",
     )
 
 
@@ -1628,7 +1679,6 @@ def _generate_study1_manifests(run_id: str, config: dict) -> int:
     total = 0
     for model in models:
         model_key = _encode_model_key(model)
-        part = 1
         rows: list[dict] = []
         for temperature in temperatures:
             for prompt_type in PROMPT_TYPES:
@@ -1654,18 +1704,13 @@ def _generate_study1_manifests(run_id: str, config: dict) -> int:
                                 "loop_index": loop_index,
                             }
                         )
-                        if len(rows) == shard_size:
-                            key = (
-                                f"runs/{run_id}/manifests/study1/{model_key}/part-{part:05d}.jsonl"
-                            )
-                            _s3_put_jsonl(key, rows)
-                            total += len(rows)
-                            rows = []
-                            part += 1
-        if rows:
-            key = f"runs/{run_id}/manifests/study1/{model_key}/part-{part:05d}.jsonl"
-            _s3_put_jsonl(key, rows)
-            total += len(rows)
+        total += _write_batch_sharded(
+            f"runs/{run_id}/manifests/study1/{model_key}",
+            rows,
+            shard_size,
+            step="STUDY1_ENUMERATE",
+            scope=f"study1/{model}",
+        )
     return total
 
 
@@ -1738,9 +1783,8 @@ def _prepare_repair_study1(run_id: str, config: dict) -> dict[str, int]:
 
     for model_id, model_rows in grouped.items():
         model_key = _encode_model_key(model_id)
-        part = 1
-        manifest_chunk: list[dict] = []
-        output_chunk: list[dict] = []
+        manifest_rows: list[dict] = []
+        output_rows: list[dict] = []
         for row in model_rows:
             manifest_row = row.get("manifest_row")
             if not isinstance(manifest_row, dict):
@@ -1750,7 +1794,7 @@ def _prepare_repair_study1(run_id: str, config: dict) -> dict[str, int]:
                     retryable=False,
                     category="validation",
                 )
-            manifest_chunk.append(manifest_row)
+            manifest_rows.append(manifest_row)
             if mode == "renormalize":
                 invalid_output = row.get("invalid_output")
                 if not isinstance(invalid_output, dict):
@@ -1760,32 +1804,35 @@ def _prepare_repair_study1(run_id: str, config: dict) -> dict[str, int]:
                         retryable=False,
                         category="validation",
                     )
-                output_chunk.append(invalid_output)
-            if len(manifest_chunk) == shard_size:
-                manifest_key = (
-                    f"runs/{run_id}/manifests/study1/{model_key}/repair-part-{part:05d}.jsonl"
-                )
-                _s3_put_jsonl(manifest_key, manifest_chunk)
-                if output_chunk:
-                    output_key = (
-                        f"runs/{run_id}/batch-output/study1/{model_key}/repair-part-{part:05d}.jsonl"
-                    )
-                    _s3_put_jsonl(output_key, output_chunk)
-                total += len(manifest_chunk)
-                manifest_chunk = []
-                output_chunk = []
-                part += 1
-        if manifest_chunk:
+                output_rows.append(invalid_output)
+        if mode == "rerun":
+            shard_sizes = _plan_batch_shards_or_raise(
+                len(manifest_rows),
+                shard_size,
+                step="STUDY1_ENUMERATE",
+                scope=f"repair study1/{model_id}",
+            )
+        else:
+            shard_sizes = []
+            remaining = len(manifest_rows)
+            while remaining > 0:
+                chunk_size = min(shard_size, remaining)
+                shard_sizes.append(chunk_size)
+                remaining -= chunk_size
+        offset = 0
+        for part, chunk_size in enumerate(shard_sizes, start=1):
             manifest_key = (
                 f"runs/{run_id}/manifests/study1/{model_key}/repair-part-{part:05d}.jsonl"
             )
+            manifest_chunk = manifest_rows[offset : offset + chunk_size]
             _s3_put_jsonl(manifest_key, manifest_chunk)
-            if output_chunk:
+            if output_rows:
                 output_key = (
                     f"runs/{run_id}/batch-output/study1/{model_key}/repair-part-{part:05d}.jsonl"
                 )
-                _s3_put_jsonl(output_key, output_chunk)
+                _s3_put_jsonl(output_key, output_rows[offset : offset + chunk_size])
             total += len(manifest_chunk)
+            offset += chunk_size
 
     return {
         "target_count": total,

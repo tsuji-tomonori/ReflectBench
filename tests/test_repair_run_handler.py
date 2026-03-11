@@ -93,24 +93,70 @@ def test_returns_409_when_no_invalid_targets_match(mod):
     assert res["statusCode"] == 409
 
 
-def test_returns_202_when_new_repair_run_created(mod):
+def test_returns_409_when_rerun_targets_violate_batch_constraints(mod):
     seed_rows = [
         {
-            "record_id": "rec-1",
+            "record_id": f"rec-{idx}",
             "model_id": "apac.amazon.nova-micro-v1:0",
             "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
             "manifest_row": {
-                "record_id": "rec-1",
+                "record_id": f"rec-{idx}",
                 "run_id": "123e4567-e89b-42d3-a456-426614174000",
                 "phase": "study1",
                 "model_id": "apac.amazon.nova-micro-v1:0",
                 "temperature": 0.9,
                 "prompt_type": "FACTUAL",
                 "target": "x",
-                "loop_index": 0,
+                "loop_index": idx,
             },
-            "invalid_output": {"recordId": "rec-1", "error": {"errorMessage": "parse failed"}},
+            "invalid_output": {"recordId": f"rec-{idx}", "error": {"errorMessage": "parse failed"}},
         }
+        for idx in range(74)
+    ]
+
+    with (
+        patch.object(mod, "_load_run_item", return_value={"state": {"S": "PARTIAL"}}),
+        patch.object(
+            mod,
+            "_load_parent_config",
+            return_value={"models": ["apac.amazon.nova-micro-v1:0"], "shard_size": 500},
+        ),
+        patch.object(mod, "_find_duplicate_repair", return_value=None),
+        patch.object(mod, "_build_seed_rows", return_value=(seed_rows, ["runs/parent/invalid/study1/model-a/invalid.jsonl"])),
+    ):
+        res = mod.handler(
+            _event(
+                "123e4567-e89b-42d3-a456-426614174000",
+                {"phase": "study1", "scope": "invalid_only", "mode": "rerun"},
+            ),
+            None,
+        )
+
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 409
+    assert body["code"] == "REPAIR_BATCH_CONSTRAINT"
+    assert "count=74" in body["message"]
+
+
+def test_returns_202_when_new_repair_run_created(mod):
+    seed_rows = [
+        {
+            "record_id": f"rec-{idx}",
+            "model_id": "apac.amazon.nova-micro-v1:0",
+            "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
+            "manifest_row": {
+                "record_id": f"rec-{idx}",
+                "run_id": "123e4567-e89b-42d3-a456-426614174000",
+                "phase": "study1",
+                "model_id": "apac.amazon.nova-micro-v1:0",
+                "temperature": 0.9,
+                "prompt_type": "FACTUAL",
+                "target": "x",
+                "loop_index": idx,
+            },
+            "invalid_output": {"recordId": f"rec-{idx}", "error": {"errorMessage": "parse failed"}},
+        }
+        for idx in range(100)
     ]
     source_invalid_keys = ["runs/parent/invalid/study1/model-a/invalid.jsonl"]
 
@@ -208,12 +254,16 @@ def test_returns_202_when_durable_execution_is_already_started(mod):
             return_value=(
                 [
                     {
-                        "record_id": "rec-1",
+                        "record_id": f"rec-{idx}",
                         "model_id": "apac.amazon.nova-micro-v1:0",
                         "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
-                        "manifest_row": {"record_id": "rec-1", "model_id": "apac.amazon.nova-micro-v1:0"},
-                        "invalid_output": {"recordId": "rec-1"},
+                        "manifest_row": {
+                            "record_id": f"rec-{idx}",
+                            "model_id": "apac.amazon.nova-micro-v1:0",
+                        },
+                        "invalid_output": {"recordId": f"rec-{idx}"},
                     }
+                    for idx in range(100)
                 ],
                 ["runs/parent/invalid/study1/model-a/invalid.jsonl"],
             ),

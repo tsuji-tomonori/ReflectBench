@@ -46,6 +46,7 @@ tags:
 ## 失敗時動作
 - `validation`: `400` または `invalid/` へ退避して継続。
 - repair API の `validation` には、親run未終端、対象 invalid 不在、重複 repair 要求を含める。
+- Bedrock Batch 投入前 validation には、model/phase ごとの件数が `100..shard_size` 制約へ分割不能なケースを含める。
 - `dependency`: backoff 再試行後、上限到達で `FAILED`。
 - `timeout`: step を中断し `last_error` を更新。
 - `internal`: 即時失敗とし調査用コンテキストを記録。
@@ -55,5 +56,6 @@ tags:
 - 可観測性メトリクスとエラー分類が矛盾しない。
 
 ## 変更履歴
+- 2026-03-12: Bedrock Batch shard 不成立時の validation エラー条件を追記 [[DD-INF-DEP-002]]
 - 2026-03-11: repair API 固有の validation エラー条件を追記 [[RQ-RDR-003]]
 - 2026-02-28: 初版作成（ログ相関キーとエラー分類規約を定義） [[BD-SYS-ADR-001]]
