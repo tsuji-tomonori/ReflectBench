@@ -395,6 +395,23 @@ def _normalized_key_for_output_key(output_key: str, phase: str) -> str:
     return key
 
 
+def _manifest_key_for_output_key(output_key: str, phase: str) -> str:
+    key = output_key.replace(f"/batch-output/{phase}/", f"/manifests/{phase}/")
+    if key.endswith(".out"):
+        key = key[:-4]
+
+    parts = key.split("/")
+    filename = parts[-1]
+    if not filename.endswith(".jsonl"):
+        return key
+
+    stem = filename.removesuffix(".jsonl")
+    for idx in range(len(parts) - 2, -1, -1):
+        if parts[idx] == stem:
+            return "/".join(parts[:idx] + [filename])
+    return key
+
+
 def _request_row_id(phase: str, row: dict) -> str:
     if phase == "study1":
         return str(row["record_id"])
@@ -815,7 +832,16 @@ def _extract_text_from_model_output(payload: object) -> str | None:
             parsed = json.loads(text)
         except json.JSONDecodeError:
             return text
-        return _extract_text_from_model_output(parsed)
+        if isinstance(parsed, dict):
+            if not any(
+                key in parsed
+                for key in ("text", "content", "message", "output", "modelOutput", "response", "body", "choices")
+            ):
+                return text
+        elif not isinstance(parsed, (list, str)):
+            return text
+        extracted = _extract_text_from_model_output(parsed)
+        return extracted or text
 
     if not isinstance(payload, dict):
         return None
@@ -1257,12 +1283,15 @@ def _run_prediction_phase(run_id: str, phase: str) -> tuple[list[dict], list[dic
         for key in _s3_list(f"runs/{run_id}/batch-output/{phase}/")
         if _is_batch_output_data_key(key)
     ]
-    manifest_index = _load_manifest_index(run_id, phase)
 
     output_rows: list[dict] = []
     invalid_rows: list[dict] = []
     for key in output_keys:
         rows = _s3_get_jsonl(key)
+        manifest_rows = _s3_get_jsonl(_manifest_key_for_output_key(key, phase))
+        manifest_index = {
+            _request_row_id(phase, manifest_row): manifest_row for manifest_row in manifest_rows
+        }
         normalized_rows: list[dict] = []
         for row in rows:
             if _row_error_message(row):

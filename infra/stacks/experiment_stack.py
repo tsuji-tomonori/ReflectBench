@@ -153,6 +153,7 @@ class ExperimentStack(Stack):
             handler="app.orchestrator.handler.handler",
             code=lambda_code,
             timeout=Duration.minutes(15),
+            memory_size=2048,
             environment={
                 "TABLE_NAME": run_control_table.table_name,
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
