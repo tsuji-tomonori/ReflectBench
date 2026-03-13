@@ -84,8 +84,16 @@ def test_normalize_study1_reads_bedrock_jsonl_out(mod):
         patch.object(mod, "_s3_put_jsonl") as s3_put_jsonl,
         patch.object(mod, "_write_invalid_rows") as write_invalid,
     ):
-        s3_list.side_effect = [[manifest_key], [output_key]]
-        s3_get_jsonl.side_effect = [[manifest_row], [wrapped_output]]
+        s3_list.side_effect = lambda prefix: (
+            [output_key]
+            if prefix == f"runs/{run_id}/batch-output/study1/"
+            else [manifest_key]
+            if prefix == f"runs/{run_id}/manifests/study1/"
+            else []
+        )
+        s3_get_jsonl.side_effect = lambda key: (
+            [manifest_row] if key == manifest_key else [wrapped_output] if key == output_key else []
+        )
 
         rows, invalid_rows = mod._normalize_study1(run_id)
 
@@ -136,8 +144,16 @@ def test_normalize_study1_reads_openai_compatible_choices_wrapper(mod):
         patch.object(mod, "_s3_put_jsonl") as s3_put_jsonl,
         patch.object(mod, "_write_invalid_rows") as write_invalid,
     ):
-        s3_list.side_effect = [[manifest_key], [output_key]]
-        s3_get_jsonl.side_effect = [[manifest_row], [wrapped_output]]
+        s3_list.side_effect = lambda prefix: (
+            [output_key]
+            if prefix == f"runs/{run_id}/batch-output/study1/"
+            else [manifest_key]
+            if prefix == f"runs/{run_id}/manifests/study1/"
+            else []
+        )
+        s3_get_jsonl.side_effect = lambda key: (
+            [manifest_row] if key == manifest_key else [wrapped_output] if key == output_key else []
+        )
 
         rows, invalid_rows = mod._normalize_study1(run_id)
 
@@ -580,6 +596,38 @@ def test_submit_batch_jobs_sanitizes_bedrock_job_name(mod):
     assert job_name.startswith("rb-study2-within-")
 
 
+def test_submit_batch_jobs_reuses_existing_metadata_without_resubmitting(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174036"
+    phase = "study2_within"
+    manifest_key = f"runs/{run_id}/manifests/{phase}/model-a/part-00001.jsonl"
+    metadata_key = f"runs/{run_id}/batch-output/{phase}/model-a/part-00001-job.json"
+
+    def s3_list_side_effect(prefix: str):
+        if prefix == f"runs/{run_id}/manifests/{phase}/":
+            return [manifest_key]
+        if prefix == f"runs/{run_id}/batch-output/{phase}/":
+            return [metadata_key]
+        raise AssertionError(prefix)
+
+    with (
+        patch.object(mod, "_s3_list", side_effect=s3_list_side_effect),
+        patch.object(
+            mod,
+            "_s3_get_json",
+            return_value={"manifest_key": manifest_key, "job_identifier": "job-arn-existing"},
+        ),
+        patch.object(mod, "_s3_get_jsonl") as get_jsonl,
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+        patch.object(mod.bedrock, "create_model_invocation_job") as submit_job,
+    ):
+        jobs = mod._submit_batch_jobs(run_id, phase)
+
+    assert jobs == {manifest_key: "job-arn-existing"}
+    get_jsonl.assert_not_called()
+    put_jsonl.assert_not_called()
+    submit_job.assert_not_called()
+
+
 def test_build_batch_input_rows_contains_messages(mod):
     rows = [
         {
@@ -723,8 +771,16 @@ def test_normalize_study1_parses_batch_wrapper(mod):
         patch.object(mod, "_s3_put_jsonl") as s3_put_jsonl,
         patch.object(mod, "_write_invalid_rows") as write_invalid,
     ):
-        s3_list.side_effect = [[manifest_key], [output_key]]
-        s3_get_jsonl.side_effect = [[manifest_row], [wrapped_output]]
+        s3_list.side_effect = lambda prefix: (
+            [output_key]
+            if prefix == f"runs/{run_id}/batch-output/study1/"
+            else [manifest_key]
+            if prefix == f"runs/{run_id}/manifests/study1/"
+            else []
+        )
+        s3_get_jsonl.side_effect = lambda key: (
+            [manifest_row] if key == manifest_key else [wrapped_output] if key == output_key else []
+        )
 
         rows, invalid_rows = mod._normalize_study1(run_id)
 
@@ -734,6 +790,70 @@ def test_normalize_study1_parses_batch_wrapper(mod):
     assert invalid_rows == []
     s3_put_jsonl.assert_called_once()
     write_invalid.assert_called_once_with(run_id, "study1", [])
+
+
+def test_prediction_phase_reads_only_tracked_job_output(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174037"
+    phase = "study2_within"
+    metadata_key = f"runs/{run_id}/batch-output/{phase}/model-a/part-00001-job.json"
+    output_key = f"runs/{run_id}/batch-output/{phase}/model-a/part-00001.jsonl"
+    tracked_output_key = (
+        f"runs/{run_id}/batch-output/{phase}/model-a/part-00001/job-tracked/part-00001.jsonl.out"
+    )
+    duplicate_output_key = (
+        f"runs/{run_id}/batch-output/{phase}/model-a/part-00001/job-duplicate/part-00001.jsonl.out"
+    )
+    manifest_key = f"runs/{run_id}/manifests/{phase}/model-a/part-00001.jsonl"
+    manifest_row = {
+        "source_record_id": "src-1",
+        "generator_model": "g1",
+        "predictor_model": "p1",
+        "expected_label": "HIGH",
+        "condition_type": "within",
+    }
+    request_id = mod._request_row_id(phase, manifest_row)
+    tracked_output = {
+        "recordId": request_id,
+        "modelOutput": {
+            "output": {
+                "message": {"content": [{"text": '{"predicted_label":"HIGH"}'}]}
+            }
+        },
+    }
+
+    def s3_list_side_effect(prefix: str):
+        if prefix == f"runs/{run_id}/batch-output/{phase}/":
+            return [metadata_key, tracked_output_key, duplicate_output_key]
+        if prefix == f"runs/{run_id}/batch-output/{phase}/model-a/part-00001/job-tracked/":
+            return [tracked_output_key]
+        raise AssertionError(prefix)
+
+    def s3_get_jsonl_side_effect(key: str):
+        if key == tracked_output_key:
+            return [tracked_output]
+        if key == manifest_key:
+            return [manifest_row]
+        raise AssertionError(key)
+
+    with (
+        patch.object(mod, "_s3_list", side_effect=s3_list_side_effect),
+        patch.object(
+            mod,
+            "_s3_get_json",
+            return_value={"job_identifier": "arn:aws:bedrock:ap-southeast-2:123:model-invocation-job/job-tracked", "output_key": output_key},
+        ),
+        patch.object(mod, "_s3_get_jsonl", side_effect=s3_get_jsonl_side_effect) as get_jsonl,
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+        patch.object(mod, "_write_invalid_rows") as write_invalid,
+    ):
+        rows, invalid_rows = mod._run_prediction_phase(run_id, phase)
+
+    assert len(rows) == 1
+    assert rows[0]["predicted_label"] == "HIGH"
+    assert invalid_rows == []
+    assert duplicate_output_key not in [call.args[0] for call in get_jsonl.call_args_list]
+    put_jsonl.assert_called_once()
+    write_invalid.assert_called_once_with(run_id, phase, [])
 
 
 def test_poll_batch_jobs_returns_false_when_job_still_running(mod):

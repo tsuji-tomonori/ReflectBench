@@ -377,6 +377,51 @@ def _batch_input_key_for_manifest(manifest_key: str, phase: str) -> str:
     return manifest_key.replace(f"/manifests/{phase}/", f"/batch-input/{phase}/")
 
 
+def _tracked_job_output_prefix(output_key: str, job_identifier: str) -> str:
+    job_leaf = job_identifier.rsplit("/", 1)[-1]
+    return f"{output_key.removesuffix('.jsonl')}/{job_leaf}/"
+
+
+def _tracked_output_keys_for_phase(run_id: str, phase: str) -> list[str]:
+    metadata_keys = [
+        key for key in _s3_list(f"runs/{run_id}/batch-output/{phase}/") if key.endswith("-job.json")
+    ]
+    if not metadata_keys:
+        return [
+            key
+            for key in _s3_list(f"runs/{run_id}/batch-output/{phase}/")
+            if _is_batch_output_data_key(key)
+        ]
+
+    output_keys: list[str] = []
+    for metadata_key in metadata_keys:
+        meta = _s3_get_json(metadata_key)
+        output_key = str(meta.get("output_key", "")).strip()
+        if not output_key:
+            continue
+
+        if bool(meta.get("dry_run")):
+            output_keys.append(output_key)
+            continue
+
+        job_identifier = str(meta.get("job_identifier", "")).strip()
+        if job_identifier:
+            output_keys.extend(
+                key
+                for key in _s3_list(_tracked_job_output_prefix(output_key, job_identifier))
+                if _is_batch_output_data_key(key)
+            )
+            continue
+
+        output_keys.extend(
+            key
+            for key in _s3_list(f"{output_key.removesuffix('.jsonl')}/")
+            if _is_batch_output_data_key(key)
+        )
+
+    return sorted(set(output_keys))
+
+
 def _batch_job_name(phase: str, manifest_key: str, attempt: int) -> str:
     phase_key = phase.replace("_", "-")
     return f"rb-{phase_key}-{_sha256(f'{manifest_key}|{attempt}')[:24]}"
@@ -591,8 +636,14 @@ def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
     manifest_keys = [
         key for key in _s3_list(f"runs/{run_id}/manifests/{phase}/") if key.endswith(".jsonl")
     ]
+    existing_jobs = _load_jobs_from_metadata(run_id, phase)
     jobs: dict[str, str] = {}
     for key in manifest_keys:
+        existing_job_identifier = existing_jobs.get(key)
+        if existing_job_identifier:
+            jobs[key] = existing_job_identifier
+            continue
+
         metadata_key = _metadata_key_for_manifest(key, phase)
         output_key = _output_key_for_manifest(key, phase)
         input_key = _batch_input_key_for_manifest(key, phase)
@@ -929,9 +980,7 @@ def _normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
     normalized: list[dict] = []
     invalid_rows: list[dict] = []
     manifest_index = _load_manifest_index(run_id, "study1")
-    output_keys = [
-        key for key in _s3_list(f"runs/{run_id}/batch-output/study1/") if _is_batch_output_data_key(key)
-    ]
+    output_keys = _tracked_output_keys_for_phase(run_id, "study1")
 
     for key in output_keys:
         rows = _s3_get_jsonl(key)
@@ -1278,11 +1327,7 @@ def _predict_label(seed: str, expected: str) -> str:
 
 
 def _run_prediction_phase(run_id: str, phase: str) -> tuple[list[dict], list[dict]]:
-    output_keys = [
-        key
-        for key in _s3_list(f"runs/{run_id}/batch-output/{phase}/")
-        if _is_batch_output_data_key(key)
-    ]
+    output_keys = _tracked_output_keys_for_phase(run_id, phase)
 
     output_rows: list[dict] = []
     invalid_rows: list[dict] = []
@@ -1892,9 +1937,7 @@ def _build_merged_study1_rows_for_repair(
 def _normalize_experiment_a_edit(
     run_id: str, seed_invalid_key: str | None
 ) -> tuple[list[dict], list[dict]]:
-    edit_keys = [
-        key for key in _s3_list(f"runs/{run_id}/batch-output/experiment_a_edit/") if _is_batch_output_data_key(key)
-    ]
+    edit_keys = _tracked_output_keys_for_phase(run_id, "experiment_a_edit")
     manifest_index = _load_manifest_index(run_id, "experiment_a_edit")
     edited_rows: list[dict] = []
     invalid_rows: list[dict] = []
