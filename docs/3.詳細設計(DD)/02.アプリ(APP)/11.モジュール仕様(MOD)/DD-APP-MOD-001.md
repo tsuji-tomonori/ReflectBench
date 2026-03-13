@@ -59,6 +59,8 @@ tags:
 - `across_model` は generator と異なる predictor のみを対象にする。
 - 実験Aは `PromptType.NORMAL` サンプルのみを edit 対象にし、`info_plus` / `info_minus` を予測する。
 - 実験D `wrong_label` は `FACTUAL <-> CRAZY` swap のみを対象とし、`NORMAL` は除外する。
+- Study1 / Study2 / 実験A の prompt 本文は `.ai_workspace/llm-temp-introspection/resources/prompts/*.txt` の日本語テンプレートに揃え、運用実装では `app/orchestrator/prompts.py` を正本とする。
+- Study1 prompt 本文に実際の `temperature` 値を埋め込んではならない。Study2 / 実験D prompt 本文に `condition_type`（`blind`, `wrong_label` など）の内部ラベルを露出してはならない。
 - Bedrock Batch へ投入する manifest は model/phase 単位で `100..shard_size` を満たすように再配分し、成立しない件数は validation error とする。
 - repair run は `study1` の `invalid_only` に限定し、`renormalize` は parent invalid の raw 出力再正規化、`rerun` は child manifest 再投入で処理する。
 - repair run の `rerun` は `repair_api` が seed 行件数を model 単位で検証し、親runの `shard_size` で Batch 制約を満たせない場合は child run を起動しない。

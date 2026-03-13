@@ -15,6 +15,12 @@ from app.common.api import is_valid_run_id
 from app.common.batch import plan_batch_shards
 from app.common.models import PredictionBatchRow, Study1BatchRow
 from app.orchestrator import projection
+from app.orchestrator.prompts import (
+    build_experiment_a_edit_prompt_text,
+    build_prediction_prompt_text,
+    build_study1_prompt_text,
+    prompt_type_label,
+)
 
 try:
     from aws_durable_execution_sdk_python import DurableContext, durable_execution
@@ -106,16 +112,6 @@ WORKFLOW_STEP_INDEX = {step: idx for idx, (_, step) in enumerate(WORKFLOW_STEPS,
 
 PROMPT_TYPES = ["FACTUAL", "NORMAL", "CRAZY"]
 TARGETS = ["象", "ゾウ", "ユニコーン", "マーロック", "アイレット・ドコドコ・ヤッタゼ・ペンギン"]
-PROMPT_TYPE_LABELS = {
-    "FACTUAL": "事実に基づいた",
-    "NORMAL": "",
-    "CRAZY": "クレイジーな",
-}
-PROMPT_TYPE_SWAP = {
-    "FACTUAL": "CRAZY",
-    "CRAZY": "FACTUAL",
-    "NORMAL": "NORMAL",
-}
 
 
 class PipelineError(Exception):
@@ -493,22 +489,13 @@ def _batch_payload_supported(model_id: str) -> bool:
 
 
 def _build_study1_prompt(row: dict) -> str:
-    prompt_type = PROMPT_TYPE_LABELS.get(str(row["prompt_type"]), str(row["prompt_type"]))
-    return (
-        "You are a strict JSON generator. "
-        "Return exactly one JSON object with keys "
-        '"generated_sentence" (string), "reasoning" (string), "judgment" ("HIGH" or "LOW"). '
-        "Do not include markdown or extra text.\n"
-        "Task:\n"
-        f"- Write exactly one sentence about {row['target']}.\n"
-        f"- Style hint: {prompt_type or '自然な文'}.\n"
-        f"- The generation temperature is {float(row['temperature']):.1f}.\n"
-        "- After writing the sentence, reason briefly about whether the temperature was HIGH or LOW.\n"
-        '- The final field "judgment" must be exactly "HIGH" or "LOW".'
+    return build_study1_prompt_text(
+        target=str(row["target"]),
+        prompt_type=str(row["prompt_type"]),
     )
 
 
-def _prediction_prompt_context(row: dict) -> str:
+def _build_prediction_prompt(row: dict) -> str:
     generated_sentence = str(row.get("generated_sentence") or "").strip()
     if not generated_sentence:
         raise PipelineError(
@@ -518,33 +505,11 @@ def _prediction_prompt_context(row: dict) -> str:
             category="validation",
         )
 
-    condition_type = str(row.get("condition_type") or "")
-    if condition_type == "blind":
-        return f"Sentence:\n{generated_sentence}\n"
-
-    prompt_type = str(row.get("prompt_type") or "")
-    if condition_type == "wrong_label":
-        prompt_type = PROMPT_TYPE_SWAP.get(prompt_type, prompt_type)
-
-    target = str(row.get("target") or "").strip()
-    context_lines = [f"Sentence:\n{generated_sentence}"]
-    if target:
-        context_lines.append(f"Target: {target}")
-    if prompt_type:
-        context_lines.append(f"Prompt type: {prompt_type}")
-    return "\n".join(context_lines) + "\n"
-
-
-def _build_prediction_prompt(row: dict) -> str:
-    return (
-        "You are a strict JSON generator. "
-        "Return exactly one JSON object with key "
-        '"predicted_label" ("HIGH" or "LOW"). '
-        "Do not include markdown or extra text.\n"
-        "Classify whether the generator temperature was HIGH or LOW from the sentence.\n"
-        f"Condition: {row.get('condition_type')}\n"
-        f"{_prediction_prompt_context(row)}"
-        'The final field "predicted_label" must be exactly "HIGH" or "LOW".'
+    return build_prediction_prompt_text(
+        generated_sentence=generated_sentence,
+        condition_type=str(row.get("condition_type") or ""),
+        target=str(row.get("target") or "").strip(),
+        prompt_type=str(row.get("prompt_type") or "").strip(),
     )
 
 
@@ -558,16 +523,7 @@ def _build_experiment_a_edit_prompt(row: dict) -> str:
             category="validation",
         )
 
-    return (
-        "You are a strict JSON generator. "
-        "Return exactly one JSON object with keys "
-        '"info_plus" (string), "info_minus" (string). '
-        "Do not include markdown or extra text.\n"
-        "Rewrite the sentence into two meaning-preserving variants.\n"
-        f"Original sentence: {generated_sentence}\n"
-        "- info_plus: add 2-3 concrete details such as numbers, places, or examples.\n"
-        "- info_minus: compress the sentence and keep only the essential content."
-    )
+    return build_experiment_a_edit_prompt_text(generated_sentence=generated_sentence)
 
 
 def _build_model_input(model_id: str, prompt: str, temperature: float) -> dict:
@@ -807,6 +763,12 @@ def _materialize_dryrun_batch_output_for_phase(run_id: str, phase: str) -> None:
             if phase == "study1":
                 temp = float(row["temperature"])
                 judgment = "HIGH" if temp >= 0.5 else "LOW"
+                style_label = prompt_type_label(str(row["prompt_type"]))
+                generated_sentence = (
+                    f"{row['target']}についての{style_label}文です。"
+                    if style_label
+                    else f"{row['target']}についての文です。"
+                )
                 out_rows.append(
                     {
                         "record_id": row["record_id"],
@@ -817,9 +779,7 @@ def _materialize_dryrun_batch_output_for_phase(run_id: str, phase: str) -> None:
                         "prompt_type": row["prompt_type"],
                         "target": row["target"],
                         "loop_index": row["loop_index"],
-                        "generated_sentence": (
-                            f"{row['target']}について{row['prompt_type']}な文。temperature={temp:.1f}"
-                        ),
+                        "generated_sentence": generated_sentence,
                         "reasoning": "deterministic baseline",
                         "judgment": judgment,
                     }

@@ -14,6 +14,112 @@ def mod():
     return importlib.import_module("app.orchestrator.handler")
 
 
+def test_build_study1_prompt_uses_japanese_reference_text_without_temperature_leak(mod):
+    prompt = mod._build_study1_prompt(
+        {
+            "target": "ゾウ",
+            "prompt_type": "FACTUAL",
+            "temperature": 0.9,
+        }
+    )
+
+    assert "ゾウについて、事実に基づいた文を1つ書いてください。" in prompt
+    assert "あなたのLLMの温度パラメータが高いか低いかを考察し" in prompt
+    assert '"generated_sentence"' in prompt
+    assert '"judgment"' in prompt
+    assert "0.9" not in prompt
+    assert "The generation temperature is" not in prompt
+
+
+def test_build_prediction_prompt_uses_japanese_context_and_hides_internal_condition(mod):
+    prompt = mod._build_prediction_prompt(
+        {
+            "generated_sentence": "ゾウは大きな動物です。",
+            "target": "ゾウ",
+            "prompt_type": "FACTUAL",
+            "condition_type": "within",
+        }
+    )
+
+    assert "これはLLMが生成した文です: ゾウは大きな動物です。" in prompt
+    assert "「ゾウについて、事実に基づいた文を生成する」という指示" in prompt
+    assert '"reasoning"' in prompt
+    assert '"predicted_label"' in prompt
+    assert "Condition:" not in prompt
+    assert "FACTUAL" not in prompt
+
+
+def test_build_prediction_prompt_blind_omits_target_and_prompt_type(mod):
+    prompt = mod._build_prediction_prompt(
+        {
+            "generated_sentence": "ゾウは大きな動物です。",
+            "target": "ゾウ",
+            "prompt_type": "FACTUAL",
+            "condition_type": "blind",
+        }
+    )
+
+    assert "これはLLMが生成した文です: ゾウは大きな動物です。" in prompt
+    assert "指示を受けています" not in prompt
+    assert "ゾウについて" not in prompt
+    assert "FACTUAL" not in prompt
+
+
+def test_build_prediction_prompt_wrong_label_swaps_prompt_type_label(mod):
+    prompt = mod._build_prediction_prompt(
+        {
+            "generated_sentence": "ゾウは大きな動物です。",
+            "target": "ゾウ",
+            "prompt_type": "FACTUAL",
+            "condition_type": "wrong_label",
+        }
+    )
+
+    assert "クレイジーな文を生成する" in prompt
+    assert "事実に基づいた文を生成する" not in prompt
+
+
+def test_build_experiment_a_edit_prompt_uses_japanese_template(mod):
+    prompt = mod._build_experiment_a_edit_prompt(
+        {
+            "generated_sentence": "ゾウは大きな動物です。",
+        }
+    )
+
+    assert "以下の文を2つのバリアントに書き換えてください。" in prompt
+    assert "元の文: ゾウは大きな動物です。" in prompt
+    assert '"info_plus"' in prompt
+    assert '"info_minus"' in prompt
+
+
+def test_materialize_dryrun_study1_output_does_not_embed_temperature(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174099"
+    manifest_key = f"runs/{run_id}/manifests/study1/model-a/part-00001.jsonl"
+    manifest_row = {
+        "record_id": "rec-1",
+        "run_id": run_id,
+        "phase": "study1",
+        "model_id": "model-a",
+        "temperature": 0.9,
+        "prompt_type": "FACTUAL",
+        "target": "ゾウ",
+        "loop_index": 0,
+    }
+
+    with (
+        patch.object(mod, "BATCH_DRY_RUN", True),
+        patch.object(mod, "_s3_list", return_value=[manifest_key]),
+        patch.object(mod, "_s3_get_jsonl", return_value=[manifest_row]),
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+    ):
+        mod._materialize_dryrun_batch_output_for_phase(run_id, "study1")
+
+    assert put_jsonl.call_count == 1
+    out_rows = put_jsonl.call_args.args[1]
+    assert out_rows[0]["generated_sentence"] == "ゾウについての事実に基づいた文です。"
+    assert "temperature=" not in out_rows[0]["generated_sentence"]
+
+
 def test_normalize_study1_writes_normalized_and_invalid(mod):
     run_id = "123e4567-e89b-42d3-a456-426614174000"
     output_key = f"runs/{run_id}/batch-output/study1/model-a/part-00001.jsonl"
