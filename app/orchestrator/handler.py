@@ -13,13 +13,17 @@ import boto3
 
 from app.common.api import is_valid_run_id
 from app.common.batch import plan_batch_shards
-from app.common.models import PredictionBatchRow, Study1BatchRow
+from app.common.models import PredictionBatchRow, RepairRunCreateRequest, Study1BatchRow
 from app.orchestrator import projection
 from app.orchestrator.prompts import (
     build_experiment_a_edit_prompt_text,
     build_prediction_prompt_text,
     build_study1_prompt_text,
     prompt_type_label,
+)
+from app.repair_run.handler import (
+    _build_seed_rows as _build_repair_seed_rows,
+    _validate_rerun_seed_rows as _validate_repair_rerun_seed_rows,
 )
 
 try:
@@ -1842,8 +1846,97 @@ def _load_repair_seed_rows(config: dict) -> list[dict]:
     return _s3_get_jsonl(seed_key)
 
 
+def _repair_request_from_config(config: dict) -> RepairRunCreateRequest:
+    try:
+        return RepairRunCreateRequest.model_validate(
+            {
+                "phase": config.get("repair_phase"),
+                "scope": config.get("repair_scope"),
+                "mode": config.get("repair_mode"),
+                "models": list(config.get("repair_models") or []) or None,
+                "record_ids": list(config.get("repair_record_ids") or []) or None,
+                "rebuild_downstream": bool(config.get("rebuild_downstream", False)),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason=f"repair config is invalid: {exc}",
+            retryable=False,
+            category="validation",
+        ) from exc
+
+
+def _ensure_repair_seed_rows(run_id: str, config: dict) -> list[dict]:
+    seed_key = str(config.get("repair_seed_key") or "").strip()
+    if not seed_key:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="repair_seed_key is required for repair run",
+            retryable=False,
+            category="validation",
+        )
+
+    if seed_key in _s3_list(seed_key):
+        source_invalid_keys = list(config.get("source_invalid_keys") or [])
+        if source_invalid_keys:
+            projection.save_repair_source_invalid_keys(
+                run_id=run_id,
+                source_invalid_keys=source_invalid_keys,
+            )
+        return _s3_get_jsonl(seed_key)
+
+    parent_run_id = str(config.get("parent_run_id") or "").strip()
+    if not parent_run_id:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="parent_run_id is required for repair run",
+            retryable=False,
+            category="validation",
+        )
+
+    request = _repair_request_from_config(config)
+    try:
+        seed_rows, source_invalid_keys = _build_repair_seed_rows(parent_run_id, request)
+    except ValueError as exc:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason=str(exc),
+            retryable=False,
+            category="validation",
+        ) from exc
+
+    if not seed_rows:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="no invalid records matched the requested repair scope",
+            retryable=False,
+            category="validation",
+        )
+
+    if request.mode == "rerun":
+        try:
+            _validate_repair_rerun_seed_rows(seed_rows, int(config.get("shard_size", 500)))
+        except ValueError as exc:
+            raise PipelineError(
+                step="STUDY1_ENUMERATE",
+                reason=str(exc),
+                retryable=False,
+                category="validation",
+            ) from exc
+
+    _s3_put_jsonl(seed_key, seed_rows)
+    config["source_invalid_keys"] = list(source_invalid_keys)
+    _s3_put_json(f"runs/{run_id}/config.json", config)
+    projection.save_repair_source_invalid_keys(
+        run_id=run_id,
+        source_invalid_keys=source_invalid_keys,
+    )
+    return seed_rows
+
+
 def _prepare_repair_study1(run_id: str, config: dict) -> dict[str, int]:
-    seed_rows = _load_repair_seed_rows(config)
+    seed_rows = _ensure_repair_seed_rows(run_id, config)
     if not seed_rows:
         raise PipelineError(
             step="STUDY1_ENUMERATE",
@@ -2512,7 +2605,7 @@ def _run_direct_repair_all_invalid(run_id: str, config: dict) -> dict[str, objec
             category="validation",
         )
 
-    seed_rows = _load_repair_seed_rows(config)
+    seed_rows = _ensure_repair_seed_rows(run_id, config)
     if not seed_rows:
         raise PipelineError(
             step="STUDY1_ENUMERATE",
@@ -3019,7 +3112,7 @@ def _run_repair_direct_invalids(
             workflow_state=workflow_state,
             phase="REPAIR",
             step="STUDY1_ENUMERATE",
-            func=lambda: {"target_count": len(_load_repair_seed_rows(config))},
+            func=lambda: {"target_count": len(_ensure_repair_seed_rows(run_id, config))},
         )
         if int(prepared.get("target_count", 0)) <= 0:
             raise PipelineError(

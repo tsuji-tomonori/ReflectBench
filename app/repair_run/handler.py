@@ -24,7 +24,7 @@ cloudwatch = boto3.client("cloudwatch")
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
-ORCHESTRATOR_ARN = os.environ["ORCHESTRATOR_ARN"]
+ORCHESTRATOR_ARN = os.environ.get("ORCHESTRATOR_ARN", "")
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "ReflectBench/Run")
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "PARTIAL", "CANCELLED"}
 DIRECT_REPAIR_PHASES = (
@@ -588,49 +588,12 @@ def handler(event, _context):
             extra={"duplicate_run_id": duplicate_run_id},
         )
 
-    try:
-        seed_rows, source_invalid_keys = _build_seed_rows(parent_run_id, request)
-    except ValueError as exc:
-        return problem_response(
-            status_code=400,
-            code="INVALID_REPAIR_TARGET",
-            message=str(exc),
-            category="validation",
-            retryable=False,
-            step=step,
-            trace_id=trace_id,
-        )
-
-    if not seed_rows:
-        return problem_response(
-            status_code=409,
-            code="NO_REPAIR_TARGETS",
-            message="no invalid records matched the requested repair scope",
-            category="validation",
-            retryable=False,
-            step=step,
-            trace_id=trace_id,
-        )
-
-    if request.mode == "rerun":
-        try:
-            _validate_rerun_seed_rows(seed_rows, int(parent_config.get("shard_size", 500)))
-        except ValueError as exc:
-            return problem_response(
-                status_code=409,
-                code="REPAIR_BATCH_CONSTRAINT",
-                message=str(exc),
-                category="validation",
-                retryable=False,
-                step=step,
-                trace_id=trace_id,
-            )
-
     accepted_at = _now_iso()
     run_id = str(uuid.uuid4())
     execution_name = run_id
     config_key = f"runs/{run_id}/config.json"
     seed_key = f"runs/{run_id}/repair/seed.jsonl"
+    source_invalid_keys: list[str] = []
     repair_config = {
         **parent_config,
         "run_id": run_id,
@@ -646,9 +609,19 @@ def handler(event, _context):
         "repair_seed_key": seed_key,
     }
 
+    if not ORCHESTRATOR_ARN:
+        return problem_response(
+            status_code=500,
+            code="START_REPAIR_FAILED",
+            message="failed to start repair run",
+            category="internal",
+            retryable=False,
+            step=step,
+            trace_id=trace_id,
+        )
+
     try:
         _s3_put_json(config_key, repair_config)
-        _s3_put_jsonl(seed_key, seed_rows)
 
         run_item = projection.build_run_item(
             run_id=run_id,

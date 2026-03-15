@@ -75,12 +75,33 @@ def test_returns_409_when_duplicate_repair_exists(mod):
     assert body["duplicate_run_id"] == "123e4567-e89b-42d3-a456-426614174010"
 
 
-def test_returns_409_when_no_invalid_targets_match(mod):
+def test_returns_202_when_repair_is_accepted_without_precomputing_seed_rows(mod):
     with (
         patch.object(mod, "_load_run_item", return_value={"state": {"S": "PARTIAL"}}),
-        patch.object(mod, "_load_parent_config", return_value={"models": ["apac.amazon.nova-micro-v1:0"]}),
+        patch.object(
+            mod,
+            "_load_parent_config",
+            return_value={
+                "models": ["apac.amazon.nova-micro-v1:0"],
+                "loops": 10,
+                "full_cross": True,
+                "shard_size": 500,
+                "poll_interval_sec": 180,
+                "editor_model": "apac.amazon.nova-micro-v1:0",
+            },
+        ),
         patch.object(mod, "_find_duplicate_repair", return_value=None),
-        patch.object(mod, "_build_seed_rows", return_value=([], [])),
+        patch.object(mod, "_build_seed_rows") as build_seed_rows,
+        patch.object(mod.s3, "put_object", return_value={}),
+        patch.object(mod.projection, "build_run_item", return_value={"run_id": {"S": "child"}}),
+        patch.object(mod.dynamodb, "put_item", return_value={}),
+        patch.object(
+            mod.lambda_client,
+            "invoke",
+            return_value={"StatusCode": 202, "DurableExecutionArn": None},
+        ),
+        patch.object(mod.projection, "save_execution_metadata"),
+        patch.object(mod.cloudwatch, "put_metric_data", return_value={}),
     ):
         res = mod.handler(
             _event(
@@ -90,39 +111,39 @@ def test_returns_409_when_no_invalid_targets_match(mod):
             None,
         )
 
-    assert res["statusCode"] == 409
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 202
+    assert body["repair"]["source_invalid_keys"] == []
+    build_seed_rows.assert_not_called()
 
 
-def test_returns_409_when_rerun_targets_violate_batch_constraints(mod):
-    seed_rows = [
-        {
-            "record_id": f"rec-{idx}",
-            "model_id": "apac.amazon.nova-micro-v1:0",
-            "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
-            "manifest_row": {
-                "record_id": f"rec-{idx}",
-                "run_id": "123e4567-e89b-42d3-a456-426614174000",
-                "phase": "study1",
-                "model_id": "apac.amazon.nova-micro-v1:0",
-                "temperature": 0.9,
-                "prompt_type": "FACTUAL",
-                "target": "x",
-                "loop_index": idx,
-            },
-            "invalid_output": {"recordId": f"rec-{idx}", "error": {"errorMessage": "parse failed"}},
-        }
-        for idx in range(74)
-    ]
-
+def test_returns_202_when_rerun_repair_is_accepted_without_batch_validation(mod):
     with (
         patch.object(mod, "_load_run_item", return_value={"state": {"S": "PARTIAL"}}),
         patch.object(
             mod,
             "_load_parent_config",
-            return_value={"models": ["apac.amazon.nova-micro-v1:0"], "shard_size": 500},
+            return_value={
+                "models": ["apac.amazon.nova-micro-v1:0"],
+                "loops": 10,
+                "full_cross": True,
+                "shard_size": 500,
+                "poll_interval_sec": 180,
+                "editor_model": "apac.amazon.nova-micro-v1:0",
+            },
         ),
         patch.object(mod, "_find_duplicate_repair", return_value=None),
-        patch.object(mod, "_build_seed_rows", return_value=(seed_rows, ["runs/parent/invalid/study1/model-a/invalid.jsonl"])),
+        patch.object(mod, "_build_seed_rows") as build_seed_rows,
+        patch.object(mod.s3, "put_object", return_value={}),
+        patch.object(mod.projection, "build_run_item", return_value={"run_id": {"S": "child"}}),
+        patch.object(mod.dynamodb, "put_item", return_value={}),
+        patch.object(
+            mod.lambda_client,
+            "invoke",
+            return_value={"StatusCode": 202, "DurableExecutionArn": None},
+        ),
+        patch.object(mod.projection, "save_execution_metadata"),
+        patch.object(mod.cloudwatch, "put_metric_data", return_value={}),
     ):
         res = mod.handler(
             _event(
@@ -133,9 +154,9 @@ def test_returns_409_when_rerun_targets_violate_batch_constraints(mod):
         )
 
     body = json.loads(res["body"])
-    assert res["statusCode"] == 409
-    assert body["code"] == "REPAIR_BATCH_CONSTRAINT"
-    assert "count=74" in body["message"]
+    assert res["statusCode"] == 202
+    assert body["repair"]["mode"] == "rerun"
+    build_seed_rows.assert_not_called()
 
 
 def test_returns_400_when_direct_rerun_phase_is_not_all(mod):
@@ -153,27 +174,6 @@ def test_returns_400_when_direct_rerun_phase_is_not_all(mod):
 
 
 def test_returns_202_when_new_repair_run_created(mod):
-    seed_rows = [
-        {
-            "record_id": f"rec-{idx}",
-            "model_id": "apac.amazon.nova-micro-v1:0",
-            "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
-            "manifest_row": {
-                "record_id": f"rec-{idx}",
-                "run_id": "123e4567-e89b-42d3-a456-426614174000",
-                "phase": "study1",
-                "model_id": "apac.amazon.nova-micro-v1:0",
-                "temperature": 0.9,
-                "prompt_type": "FACTUAL",
-                "target": "x",
-                "loop_index": idx,
-            },
-            "invalid_output": {"recordId": f"rec-{idx}", "error": {"errorMessage": "parse failed"}},
-        }
-        for idx in range(100)
-    ]
-    source_invalid_keys = ["runs/parent/invalid/study1/model-a/invalid.jsonl"]
-
     with (
         patch.object(mod, "_load_run_item", return_value={"state": {"S": "PARTIAL"}}),
         patch.object(
@@ -189,7 +189,7 @@ def test_returns_202_when_new_repair_run_created(mod):
             },
         ),
         patch.object(mod, "_find_duplicate_repair", return_value=None),
-        patch.object(mod, "_build_seed_rows", return_value=(seed_rows, source_invalid_keys)),
+        patch.object(mod, "_build_seed_rows") as build_seed_rows,
         patch.object(mod.s3, "put_object", return_value={}) as put_object,
         patch.object(mod.projection, "build_run_item", return_value={"run_id": {"S": "child"}}) as build_item,
         patch.object(mod.dynamodb, "put_item", return_value={}),
@@ -226,46 +226,18 @@ def test_returns_202_when_new_repair_run_created(mod):
         "parent_run_id": "123e4567-e89b-42d3-a456-426614174000",
     }
     assert body["repair"]["mode"] == "rerun"
-    assert body["repair"]["source_invalid_keys"] == source_invalid_keys
-    assert put_object.call_count == 2
+    assert body["repair"]["source_invalid_keys"] == []
+    assert put_object.call_count == 1
     assert invoke.call_args.kwargs["DurableExecutionName"] == body["run_id"]
     assert build_item.call_args.kwargs["parent_run_id"] == "123e4567-e89b-42d3-a456-426614174000"
     assert build_item.call_args.kwargs["repair_mode"] == "rerun"
     save_execution.assert_called_once()
     metric = put_metric.call_args.kwargs["MetricData"][0]
     assert metric["MetricName"] == "RepairRunStarted"
+    build_seed_rows.assert_not_called()
 
 
 def test_returns_202_when_new_direct_repair_run_created(mod):
-    seed_rows = [
-        {
-            "record_id": "rec-1",
-            "logical_phase": "study1",
-            "manifest_phase": "study1",
-            "model_id": "apac.amazon.nova-micro-v1:0",
-            "repairable": True,
-            "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
-            "manifest_row": {
-                "record_id": "rec-1",
-                "run_id": "123e4567-e89b-42d3-a456-426614174000",
-                "phase": "study1",
-                "model_id": "apac.amazon.nova-micro-v1:0",
-                "temperature": 0.9,
-                "prompt_type": "FACTUAL",
-                "target": "x",
-                "loop_index": 0,
-            },
-            "invalid_output": {"recordId": "rec-1", "error": {"errorMessage": "parse failed"}},
-            "source_invalid_row": {
-                "phase": "study1",
-                "record_id": "rec-1",
-                "model": "apac.amazon.nova-micro-v1:0",
-                "reason": "parse failed",
-            },
-        }
-    ]
-    source_invalid_keys = ["runs/parent/invalid/study1/model-a/invalid.jsonl"]
-
     with (
         patch.object(mod, "_load_run_item", return_value={"state": {"S": "PARTIAL"}}),
         patch.object(
@@ -281,7 +253,7 @@ def test_returns_202_when_new_direct_repair_run_created(mod):
             },
         ),
         patch.object(mod, "_find_duplicate_repair", return_value=None),
-        patch.object(mod, "_build_seed_rows", return_value=(seed_rows, source_invalid_keys)),
+        patch.object(mod, "_build_seed_rows") as build_seed_rows,
         patch.object(mod.s3, "put_object", return_value={}) as put_object,
         patch.object(mod.projection, "build_run_item", return_value={"run_id": {"S": "child"}}) as build_item,
         patch.object(mod.dynamodb, "put_item", return_value={}),
@@ -315,9 +287,11 @@ def test_returns_202_when_new_direct_repair_run_created(mod):
     assert res["statusCode"] == 202
     assert body["repair"]["phase"] == "all"
     assert body["repair"]["mode"] == "direct_rerun"
-    assert put_object.call_count == 2
+    assert body["repair"]["source_invalid_keys"] == []
+    assert put_object.call_count == 1
     assert build_item.call_args.kwargs["repair_phase"] == "all"
     assert build_item.call_args.kwargs["repair_mode"] == "direct_rerun"
+    build_seed_rows.assert_not_called()
 
 
 def test_returns_202_when_durable_execution_is_already_started(mod):
@@ -346,26 +320,7 @@ def test_returns_202_when_durable_execution_is_already_started(mod):
             },
         ),
         patch.object(mod, "_find_duplicate_repair", return_value=None),
-        patch.object(
-            mod,
-            "_build_seed_rows",
-            return_value=(
-                [
-                    {
-                        "record_id": f"rec-{idx}",
-                        "model_id": "apac.amazon.nova-micro-v1:0",
-                        "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
-                        "manifest_row": {
-                            "record_id": f"rec-{idx}",
-                            "model_id": "apac.amazon.nova-micro-v1:0",
-                        },
-                        "invalid_output": {"recordId": f"rec-{idx}"},
-                    }
-                    for idx in range(100)
-                ],
-                ["runs/parent/invalid/study1/model-a/invalid.jsonl"],
-            ),
-        ),
+        patch.object(mod, "_build_seed_rows") as build_seed_rows,
         patch.object(mod.s3, "put_object", return_value={}),
         patch.object(mod.projection, "build_run_item", return_value={"run_id": {"S": "child"}}),
         patch.object(mod.dynamodb, "put_item", return_value={}),
@@ -382,3 +337,4 @@ def test_returns_202_when_durable_execution_is_already_started(mod):
 
     assert res["statusCode"] == 202
     save_execution.assert_called_once()
+    build_seed_rows.assert_not_called()

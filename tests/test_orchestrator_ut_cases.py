@@ -526,7 +526,7 @@ def test_prepare_repair_study1_writes_manifest_and_seeded_output(mod):
     ]
 
     with (
-        patch.object(mod, "_s3_get_jsonl", return_value=seed_rows),
+        patch.object(mod, "_ensure_repair_seed_rows", return_value=seed_rows),
         patch.object(mod, "_s3_put_jsonl") as put_jsonl,
     ):
         result = mod._prepare_repair_study1(run_id, config)
@@ -561,7 +561,7 @@ def test_prepare_repair_study1_rerun_rebalances_manifest_chunks(mod):
     ]
 
     with (
-        patch.object(mod, "_s3_get_jsonl", return_value=seed_rows),
+        patch.object(mod, "_ensure_repair_seed_rows", return_value=seed_rows),
         patch.object(mod, "_s3_put_jsonl") as put_jsonl,
     ):
         result = mod._prepare_repair_study1(run_id, config)
@@ -596,12 +596,44 @@ def test_prepare_repair_study1_rerun_raises_when_model_group_below_batch_minimum
         for idx in range(74)
     ]
 
-    with patch.object(mod, "_s3_get_jsonl", return_value=seed_rows):
+    with patch.object(mod, "_ensure_repair_seed_rows", return_value=seed_rows):
         with pytest.raises(mod.PipelineError) as excinfo:
             mod._prepare_repair_study1(run_id, config)
 
     assert excinfo.value.step == "STUDY1_ENUMERATE"
     assert "count=74" in excinfo.value.reason
+
+
+def test_ensure_repair_seed_rows_builds_and_persists_missing_seed(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174034"
+    config = {
+        "parent_run_id": "123e4567-e89b-42d3-a456-426614174000",
+        "repair_phase": "all",
+        "repair_scope": "invalid_only",
+        "repair_mode": "direct_rerun",
+        "repair_seed_key": f"runs/{run_id}/repair/seed.jsonl",
+        "repair_models": [],
+        "repair_record_ids": [],
+        "rebuild_downstream": False,
+        "shard_size": 500,
+    }
+    seed_rows = [{"record_id": "rec-1", "model_id": "model-a", "repairable": True}]
+    source_invalid_keys = ["runs/parent/invalid/study1/model-a/invalid.jsonl"]
+
+    with (
+        patch.object(mod, "_s3_list", return_value=[]),
+        patch.object(mod, "_build_repair_seed_rows", return_value=(seed_rows, source_invalid_keys)),
+        patch.object(mod, "_s3_put_jsonl") as put_jsonl,
+        patch.object(mod, "_s3_put_json") as put_json,
+        patch.object(mod.projection, "save_repair_source_invalid_keys") as save_keys,
+    ):
+        rows = mod._ensure_repair_seed_rows(run_id, config)
+
+    assert rows == seed_rows
+    put_jsonl.assert_called_once_with(config["repair_seed_key"], seed_rows)
+    put_json.assert_called_once_with(f"runs/{run_id}/config.json", config)
+    save_keys.assert_called_once_with(run_id=run_id, source_invalid_keys=source_invalid_keys)
+    assert config["source_invalid_keys"] == source_invalid_keys
 
 
 def test_build_merged_study1_rows_for_repair_replaces_repaired_records(mod):

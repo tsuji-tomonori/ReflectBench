@@ -90,6 +90,18 @@ def save_execution_metadata(
     )
 
 
+def save_repair_source_invalid_keys(*, run_id: str, source_invalid_keys: list[str]) -> None:
+    dynamodb.update_item(
+        TableName=TABLE_NAME,
+        Key={"run_id": {"S": run_id}},
+        UpdateExpression="SET source_invalid_keys = :source_invalid_keys, updated_at = :updated_at",
+        ExpressionAttributeValues={
+            ":source_invalid_keys": {"L": [{"S": key} for key in source_invalid_keys]},
+            ":updated_at": {"S": _now_iso()},
+        },
+    )
+
+
 def mark_running(
     *,
     run_id: str,
