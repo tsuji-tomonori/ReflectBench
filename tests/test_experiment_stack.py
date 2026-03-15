@@ -88,3 +88,32 @@ def test_orchestrator_role_allows_direct_bedrock_invoke(
 
     assert any("bedrock:InvokeModel" in actions for actions in action_sets)
     assert any("bedrock:InvokeModelWithResponseStream" in actions for actions in action_sets)
+
+
+def test_repair_run_function_has_extended_timeout_for_direct_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aws_cdk import Environment
+    from aws_cdk import aws_lambda as lambda_
+    from aws_cdk.assertions import Template
+
+    from infra.stacks.experiment_stack import ExperimentStack
+
+    def fake_from_asset(*_args, **_kwargs):
+        return lambda_.Code.from_inline("def handler(event, context):\n    return {}\n")
+
+    monkeypatch.setattr(lambda_.Code, "from_asset", staticmethod(fake_from_asset))
+
+    app = aws_cdk.App()
+    stack = ExperimentStack(app, "ExperimentStackRepairSizing", env=Environment(region="ap-southeast-2"))
+    template = Template.from_stack(stack).to_json()
+
+    repair_fn = next(
+        resource["Properties"]
+        for resource in template["Resources"].values()
+        if resource["Type"] == "AWS::Lambda::Function"
+        and resource["Properties"].get("FunctionName") == "repair_run_fn"
+    )
+
+    assert repair_fn["Timeout"] == 900
+    assert repair_fn["MemorySize"] == 1024

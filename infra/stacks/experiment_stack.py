@@ -253,7 +253,8 @@ class ExperimentStack(Stack):
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="app.repair_run.handler.handler",
             code=lambda_code,
-            timeout=Duration.seconds(30),
+            timeout=Duration.minutes(15),
+            memory_size=1024,
             environment={
                 "TABLE_NAME": run_control_table.table_name,
                 "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
