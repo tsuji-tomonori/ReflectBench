@@ -1,0 +1,4 @@
+prompt_type,accuracy,rows
+FACTUAL,0.493,845
+NORMAL,0.479,847
+CRAZY,0.467,843

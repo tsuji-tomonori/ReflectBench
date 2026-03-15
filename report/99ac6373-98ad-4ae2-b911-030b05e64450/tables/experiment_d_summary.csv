@@ -1,0 +1,7 @@
+predictor_model,condition_type,accuracy,positive_rate,rows,predictor,accuracy_delta_wrong_label_minus_blind,p_high_delta_blind_minus_wrong_label
+google.gemma-3-12b-it,blind,0.415,0.714,3868,GEMMA_3_12B,-0.084,-0.198
+google.gemma-3-12b-it,wrong_label,0.331,0.912,2578,GEMMA_3_12B,-0.084,-0.198
+mistral.ministral-3-8b-instruct,blind,0.435,0.695,3865,MINISTRAL_3_8B,-0.073,-0.196
+mistral.ministral-3-8b-instruct,wrong_label,0.362,0.892,2573,MINISTRAL_3_8B,-0.073,-0.196
+apac.amazon.nova-micro-v1:0,blind,0.425,0.709,3867,NOVA_MICRO,-0.115,-0.289
+apac.amazon.nova-micro-v1:0,wrong_label,0.31,0.997,2577,NOVA_MICRO,-0.115,-0.289

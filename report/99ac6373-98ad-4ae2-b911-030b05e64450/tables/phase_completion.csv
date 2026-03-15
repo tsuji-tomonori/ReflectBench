@@ -1,0 +1,6 @@
+phase,expected_models,valid_models,invalid_models,valid_rows,invalid_rows,status,dominant_invalid_reason,note
+Study 1,"NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, MINISTRAL_3_8B",4745,205,partial,modelOutput text is not a JSON object,dominant invalid: modelOutput text is not a JSON object
+Study 2 within,NOVA_MICRO,"NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B",-,2535,0,complete,-,-
+Study 2 across,"GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B",NOVA_MICRO,5069,3,partial,modelOutput text is not a JSON object,dominant invalid: modelOutput text is not a JSON object
+Experiment A,"NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, MINISTRAL_3_8B, unknown",7628,23,partial,modelOutput text is not a JSON object,dominant invalid: modelOutput text is not a JSON object
+Experiment D,"NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, GEMMA_3_12B, MINISTRAL_3_8B","NOVA_MICRO, MINISTRAL_3_8B, unknown",19328,13,partial,modelOutput text is not a JSON object,dominant invalid: modelOutput text is not a JSON object

@@ -1,0 +1,7 @@
+predictor_model,condition_type,accuracy,positive_rate,rows,predictor,accuracy_delta_minus_vs_plus,p_high_delta_plus_vs_minus
+google.gemma-3-12b-it,info_minus,0.414,0.687,1272,GEMMA_3_12B,0.105,0.27
+google.gemma-3-12b-it,info_plus,0.309,0.957,1272,GEMMA_3_12B,0.105,0.27
+mistral.ministral-3-8b-instruct,info_minus,0.4,0.768,1271,MINISTRAL_3_8B,0.014,0.049
+mistral.ministral-3-8b-instruct,info_plus,0.386,0.817,1270,MINISTRAL_3_8B,0.014,0.049
+apac.amazon.nova-micro-v1:0,info_minus,0.432,0.708,1271,NOVA_MICRO,0.041,0.09
+apac.amazon.nova-micro-v1:0,info_plus,0.391,0.798,1272,NOVA_MICRO,0.041,0.09

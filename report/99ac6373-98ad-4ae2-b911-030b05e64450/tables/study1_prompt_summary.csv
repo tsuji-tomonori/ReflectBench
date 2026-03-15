@@ -1,0 +1,4 @@
+prompt_type,rows,high_rate,extreme_rows,extreme_accuracy
+FACTUAL,1576,0.286,846,0.526
+NORMAL,1584,0.516,847,0.558
+CRAZY,1585,0.985,843,0.473

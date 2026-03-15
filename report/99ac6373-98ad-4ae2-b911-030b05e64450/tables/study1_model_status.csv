@@ -1,0 +1,4 @@
+model_id,model,valid_rows,invalid_rows,status,dominant_invalid_reason
+apac.amazon.nova-micro-v1:0,NOVA_MICRO,1648,2,mixed,modelOutput text is not a JSON object
+google.gemma-3-12b-it,GEMMA_3_12B,1650,0,valid,-
+mistral.ministral-3-8b-instruct,MINISTRAL_3_8B,1447,203,mixed,modelOutput text is not a JSON object
