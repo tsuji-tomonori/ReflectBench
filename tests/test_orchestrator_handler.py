@@ -324,6 +324,40 @@ def test_handler_runs_repair_workflow_without_downstream_rebuild(mod):
     emit_metrics.assert_called_once()
 
 
+def test_handler_runs_direct_repair_workflow(mod):
+    run_id = "123e4567-e89b-42d3-a456-426614174031"
+    repair_config = {
+        "parent_run_id": "123e4567-e89b-42d3-a456-426614174000",
+        "repair_phase": "all",
+        "repair_scope": "invalid_only",
+        "repair_mode": "direct_rerun",
+        "rebuild_downstream": False,
+    }
+
+    with (
+        patch.object(mod, "_load_config", return_value=repair_config),
+        patch.object(mod, "_run_repair_direct_invalids") as run_direct_repair,
+        patch.object(mod, "_run_repair_study1") as run_repair_study1,
+        patch.object(mod, "_run_study2") as run_study2,
+        patch.object(mod, "_run_experiment_a_workflow") as run_experiment_a,
+        patch.object(mod, "_run_experiment_d_workflow") as run_experiment_d,
+        patch.object(mod, "_run_report") as run_report,
+        patch.object(mod.projection, "finalize") as finalize,
+        patch.object(mod, "_emit_finalize_metrics") as emit_metrics,
+    ):
+        res = mod.handler({"run_id": run_id}, None)
+
+    assert res["ok"] is True
+    run_direct_repair.assert_called_once()
+    run_repair_study1.assert_not_called()
+    run_study2.assert_not_called()
+    run_experiment_a.assert_not_called()
+    run_experiment_d.assert_not_called()
+    run_report.assert_called_once()
+    assert finalize.call_args.kwargs["state"] == "SUCCEEDED"
+    emit_metrics.assert_called_once()
+
+
 def test_emit_finalize_metrics_contains_required_names(mod):
     state = {"invalid_counts": {"study1": 2, "study2_within": 1}}
     with (

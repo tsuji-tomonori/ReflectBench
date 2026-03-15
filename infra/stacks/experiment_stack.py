@@ -174,7 +174,12 @@ class ExperimentStack(Stack):
             )
         orchestrator_fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:CreateModelInvocationJob", "bedrock:GetModelInvocationJob"],
+                actions=[
+                    "bedrock:CreateModelInvocationJob",
+                    "bedrock:GetModelInvocationJob",
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
                 resources=[
                     "arn:aws:bedrock:*::foundation-model/*",
                     "arn:aws:bedrock:*:*:foundation-model/*",

@@ -138,6 +138,20 @@ def test_returns_409_when_rerun_targets_violate_batch_constraints(mod):
     assert "count=74" in body["message"]
 
 
+def test_returns_400_when_direct_rerun_phase_is_not_all(mod):
+    res = mod.handler(
+        _event(
+            "123e4567-e89b-42d3-a456-426614174000",
+            {"phase": "study1", "scope": "invalid_only", "mode": "direct_rerun"},
+        ),
+        None,
+    )
+
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 400
+    assert body["code"] == "INVALID_REQUEST"
+
+
 def test_returns_202_when_new_repair_run_created(mod):
     seed_rows = [
         {
@@ -220,6 +234,90 @@ def test_returns_202_when_new_repair_run_created(mod):
     save_execution.assert_called_once()
     metric = put_metric.call_args.kwargs["MetricData"][0]
     assert metric["MetricName"] == "RepairRunStarted"
+
+
+def test_returns_202_when_new_direct_repair_run_created(mod):
+    seed_rows = [
+        {
+            "record_id": "rec-1",
+            "logical_phase": "study1",
+            "manifest_phase": "study1",
+            "model_id": "apac.amazon.nova-micro-v1:0",
+            "repairable": True,
+            "source_invalid_key": "runs/parent/invalid/study1/model-a/invalid.jsonl",
+            "manifest_row": {
+                "record_id": "rec-1",
+                "run_id": "123e4567-e89b-42d3-a456-426614174000",
+                "phase": "study1",
+                "model_id": "apac.amazon.nova-micro-v1:0",
+                "temperature": 0.9,
+                "prompt_type": "FACTUAL",
+                "target": "x",
+                "loop_index": 0,
+            },
+            "invalid_output": {"recordId": "rec-1", "error": {"errorMessage": "parse failed"}},
+            "source_invalid_row": {
+                "phase": "study1",
+                "record_id": "rec-1",
+                "model": "apac.amazon.nova-micro-v1:0",
+                "reason": "parse failed",
+            },
+        }
+    ]
+    source_invalid_keys = ["runs/parent/invalid/study1/model-a/invalid.jsonl"]
+
+    with (
+        patch.object(mod, "_load_run_item", return_value={"state": {"S": "PARTIAL"}}),
+        patch.object(
+            mod,
+            "_load_parent_config",
+            return_value={
+                "models": ["apac.amazon.nova-micro-v1:0"],
+                "loops": 10,
+                "full_cross": True,
+                "shard_size": 500,
+                "poll_interval_sec": 180,
+                "editor_model": "apac.amazon.nova-micro-v1:0",
+            },
+        ),
+        patch.object(mod, "_find_duplicate_repair", return_value=None),
+        patch.object(mod, "_build_seed_rows", return_value=(seed_rows, source_invalid_keys)),
+        patch.object(mod.s3, "put_object", return_value={}) as put_object,
+        patch.object(mod.projection, "build_run_item", return_value={"run_id": {"S": "child"}}) as build_item,
+        patch.object(mod.dynamodb, "put_item", return_value={}),
+        patch.object(
+            mod.lambda_client,
+            "invoke",
+            return_value={
+                "StatusCode": 202,
+                "DurableExecutionArn": (
+                    "arn:aws:lambda:ap-southeast-2:123:durable-execution/"
+                    "orchestrator_durable_fn/live/run-1"
+                ),
+            },
+        ),
+        patch.object(mod.projection, "save_execution_metadata"),
+        patch.object(mod.cloudwatch, "put_metric_data", return_value={}),
+    ):
+        res = mod.handler(
+            _event(
+                "123e4567-e89b-42d3-a456-426614174000",
+                {
+                    "phase": "all",
+                    "scope": "invalid_only",
+                    "mode": "direct_rerun",
+                },
+            ),
+            None,
+        )
+
+    body = json.loads(res["body"])
+    assert res["statusCode"] == 202
+    assert body["repair"]["phase"] == "all"
+    assert body["repair"]["mode"] == "direct_rerun"
+    assert put_object.call_count == 2
+    assert build_item.call_args.kwargs["repair_phase"] == "all"
+    assert build_item.call_args.kwargs["repair_mode"] == "direct_rerun"
 
 
 def test_returns_202_when_durable_execution_is_already_started(mod):

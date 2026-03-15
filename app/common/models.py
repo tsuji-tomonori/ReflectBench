@@ -1,7 +1,7 @@
 from typing import Literal
-from pydantic import field_validator
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 
 DEFAULT_EDITOR_MODEL: Literal["apac.amazon.nova-micro-v1:0"] = "apac.amazon.nova-micro-v1:0"
 ALL_MODELS = [
@@ -52,9 +52,9 @@ class RunCreateRequest(BaseModel):
 class RepairRunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    phase: Literal["study1"]
+    phase: Literal["study1", "all"]
     scope: Literal["invalid_only"]
-    mode: Literal["renormalize", "rerun"]
+    mode: Literal["renormalize", "rerun", "direct_rerun"]
     models: list[str] | None = Field(default=None, min_length=1)
     record_ids: list[str] | None = Field(default=None, min_length=1)
     rebuild_downstream: bool = False
@@ -85,6 +85,16 @@ class RepairRunCreateRequest(BaseModel):
         if any(not record_id for record_id in deduped):
             raise ValueError("record_ids must not contain empty value")
         return deduped
+
+    @model_validator(mode="after")
+    def validate_phase_mode_combination(self):
+        if self.mode in {"renormalize", "rerun"} and self.phase != "study1":
+            raise ValueError("renormalize/rerun repair is only supported for phase=study1")
+        if self.mode == "direct_rerun" and self.phase != "all":
+            raise ValueError("direct_rerun repair requires phase=all")
+        if self.mode == "direct_rerun" and self.rebuild_downstream:
+            raise ValueError("direct_rerun repair does not support rebuild_downstream")
+        return self
 
 
 class Study1BatchRow(BaseModel):

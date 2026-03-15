@@ -78,6 +78,7 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 bedrock = boto3.client("bedrock")
+bedrock_runtime = boto3.client("bedrock-runtime")
 cloudwatch = boto3.client("cloudwatch")
 
 TABLE_NAME = os.environ["TABLE_NAME"]
@@ -112,6 +113,7 @@ WORKFLOW_STEP_INDEX = {step: idx for idx, (_, step) in enumerate(WORKFLOW_STEPS,
 
 PROMPT_TYPES = ["FACTUAL", "NORMAL", "CRAZY"]
 TARGETS = ["象", "ゾウ", "ユニコーン", "マーロック", "アイレット・ドコドコ・ヤッタゼ・ペンギン"]
+FINAL_REPAIR_PHASES = ("study1", "study2_within", "study2_across", "experiment_a", "experiment_d")
 
 
 class PipelineError(Exception):
@@ -586,6 +588,56 @@ def _build_batch_input_rows(phase: str, rows: list[dict], model_id: str) -> list
             }
         )
     return out_rows
+
+
+def _read_response_body_text(body) -> str:
+    if hasattr(body, "read"):
+        raw = body.read()
+    else:
+        raw = body
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8")
+    return str(raw)
+
+
+def _invoke_model_direct(model_id: str, prompt: str, temperature: float):
+    if _uses_converse_batch_payload(model_id):
+        return bedrock_runtime.converse(
+            modelId=model_id,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": prompt}],
+                }
+            ],
+            inferenceConfig={"temperature": temperature},
+        )
+
+    response = bedrock_runtime.invoke_model(
+        modelId=model_id,
+        body=json.dumps(_build_model_input(model_id, prompt, temperature)).encode("utf-8"),
+        contentType="application/json",
+        accept="application/json",
+    )
+    body_text = _read_response_body_text(response.get("body"))
+    try:
+        return json.loads(body_text)
+    except json.JSONDecodeError:
+        return {"body": body_text}
+
+
+def _invoke_direct_payload(
+    model_id: str,
+    prompt: str,
+    temperature: float,
+) -> tuple[dict | None, str | None, object | None]:
+    try:
+        model_output = _invoke_model_direct(model_id, prompt, temperature)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"direct invoke failed: {exc}", None
+
+    payload, reason = _extract_batch_payload({"modelOutput": model_output})
+    return payload, reason, model_output
 
 
 def _submit_batch_jobs(run_id: str, phase: str) -> dict[str, str]:
@@ -2149,6 +2201,391 @@ def _normalize_experiment_d(
     return results, all_invalid
 
 
+def _invalid_raw_text(value: object) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _seed_source_invalid_row(seed_row: dict) -> dict:
+    source = seed_row.get("source_invalid_row")
+    return source if isinstance(source, dict) else {}
+
+
+def _direct_invalid_row(
+    run_id: str,
+    seed_row: dict,
+    reason: str,
+    *,
+    model_id: str | None = None,
+    phase: str | None = None,
+    raw_payload: object | None = None,
+) -> dict:
+    source = _seed_source_invalid_row(seed_row)
+    raw_text = (
+        _invalid_raw_text(raw_payload)
+        if raw_payload is not None
+        else str(source.get("raw_text") or _invalid_raw_text(source or seed_row))
+    )
+    return {
+        "run_id": run_id,
+        "phase": phase or str(source.get("phase") or seed_row.get("logical_phase") or "unknown"),
+        "record_id": str(source.get("record_id") or seed_row.get("record_id") or "unknown"),
+        "model": model_id or str(source.get("model") or seed_row.get("model_id") or "unknown"),
+        "reason": reason,
+        "raw_text": raw_text,
+    }
+
+
+def _carry_forward_invalid_row(run_id: str, seed_row: dict) -> dict:
+    source = _seed_source_invalid_row(seed_row)
+    reason = str(
+        seed_row.get("carry_forward_reason")
+        or source.get("reason")
+        or "direct repair could not be applied"
+    )
+    return _direct_invalid_row(run_id, seed_row, reason, raw_payload=source or seed_row)
+
+
+def _study1_row_from_payload(run_id: str, manifest_row: dict, payload: dict) -> dict:
+    rec_obj = {
+        "record_id": manifest_row["record_id"],
+        "run_id": run_id,
+        "phase": "study1",
+        "model_id": manifest_row["model_id"],
+        "temperature": manifest_row["temperature"],
+        "prompt_type": manifest_row["prompt_type"],
+        "target": manifest_row["target"],
+        "loop_index": manifest_row["loop_index"],
+        "generated_sentence": payload.get("generated_sentence")
+        or payload.get("sentence")
+        or payload.get("text")
+        or "",
+        "reasoning": payload.get("reasoning") or payload.get("rationale") or "",
+        "judgment": payload.get("judgment"),
+    }
+    return Study1BatchRow.model_validate(rec_obj).model_dump()
+
+
+def _prediction_row_from_payload(
+    run_id: str,
+    *,
+    request_phase: str,
+    output_phase: str,
+    manifest_row: dict,
+    payload: dict,
+) -> dict:
+    parsed_input = {
+        "source_record_id": manifest_row["source_record_id"],
+        "generator_model": manifest_row["generator_model"],
+        "predictor_model": manifest_row["predictor_model"],
+        "expected_label": manifest_row["expected_label"],
+        "condition_type": manifest_row["condition_type"],
+        "predicted_label": payload.get("predicted_label"),
+    }
+    validated = PredictionBatchRow.model_validate(parsed_input).model_dump()
+    seed = (
+        f"{request_phase}|{validated['source_record_id']}|{validated['predictor_model']}"
+        f"|{validated['condition_type']}"
+    )
+    return {
+        "record_id": _sha256(seed),
+        "run_id": run_id,
+        "phase": output_phase,
+        "condition_type": validated["condition_type"],
+        "generator_model": validated["generator_model"],
+        "predictor_model": validated["predictor_model"],
+        "source_record_id": validated["source_record_id"],
+        "expected_label": validated["expected_label"],
+        "predicted_label": validated["predicted_label"],
+        "is_correct": validated["predicted_label"] == validated["expected_label"],
+        "raw_text": json.dumps(validated, ensure_ascii=False),
+    }
+
+
+def _experiment_a_edit_row_from_payload(manifest_row: dict, payload: dict) -> tuple[dict | None, str | None]:
+    edited = {
+        "source_record_id": manifest_row["source_record_id"],
+        "generator_model": manifest_row["generator_model"],
+        "prompt_type": manifest_row["prompt_type"],
+        "target": manifest_row["target"],
+        "temperature": manifest_row["temperature"],
+        "expected_label": manifest_row["expected_label"],
+        "generated_sentence": manifest_row["generated_sentence"],
+        "info_plus": payload.get("info_plus"),
+        "info_minus": payload.get("info_minus"),
+    }
+    if (
+        edited.get("expected_label") not in {"HIGH", "LOW"}
+        or not isinstance(edited.get("info_plus"), str)
+        or not str(edited.get("info_plus")).strip()
+        or not isinstance(edited.get("info_minus"), str)
+        or not str(edited.get("info_minus")).strip()
+    ):
+        return None, "experiment_a_edit output is missing info_plus/info_minus"
+    return edited, None
+
+
+def _merge_rows_by_record_id(parent_rows: list[dict], repaired_rows: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for row in parent_rows:
+        record_id = str(row.get("record_id") or "").strip()
+        if record_id:
+            merged[record_id] = row
+    for row in repaired_rows:
+        record_id = str(row.get("record_id") or "").strip()
+        if record_id:
+            merged[record_id] = row
+    return [merged[key] for key in sorted(merged)]
+
+
+def _write_normalized_phase_rows(run_id: str, phase: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+    filename = "merged.jsonl" if phase == "study1" else "results.jsonl"
+    _s3_put_jsonl(f"runs/{run_id}/normalized/{phase}/{filename}", rows)
+
+
+def _repair_study1_seed_direct(run_id: str, seed_row: dict) -> tuple[list[dict], list[dict]]:
+    manifest_row = seed_row.get("manifest_row")
+    model_id = str(seed_row.get("model_id") or "")
+    if not isinstance(manifest_row, dict) or not model_id:
+        return [], [_carry_forward_invalid_row(run_id, seed_row)]
+
+    prompt = _build_study1_prompt(manifest_row)
+    payload, reason, raw_output = _invoke_direct_payload(
+        model_id,
+        prompt,
+        float(manifest_row["temperature"]),
+    )
+    if payload is None:
+        return [], [
+            _direct_invalid_row(
+                run_id,
+                seed_row,
+                str(reason or "direct invoke failed"),
+                model_id=model_id,
+                raw_payload=raw_output,
+            )
+        ]
+
+    try:
+        return [_study1_row_from_payload(run_id, manifest_row, payload)], []
+    except Exception as exc:  # noqa: BLE001
+        return [], [
+            _direct_invalid_row(
+                run_id,
+                seed_row,
+                f"schema validation failed: {exc}",
+                model_id=model_id,
+                raw_payload=payload,
+            )
+        ]
+
+
+def _repair_prediction_seed_direct(
+    run_id: str,
+    seed_row: dict,
+    *,
+    request_phase: str,
+    output_phase: str,
+) -> tuple[list[dict], list[dict]]:
+    manifest_row = seed_row.get("manifest_row")
+    model_id = str(seed_row.get("model_id") or "")
+    if not isinstance(manifest_row, dict) or not model_id:
+        return [], [_carry_forward_invalid_row(run_id, seed_row)]
+
+    prompt = _build_prediction_prompt(manifest_row)
+    payload, reason, raw_output = _invoke_direct_payload(model_id, prompt, 0.0)
+    if payload is None:
+        return [], [
+            _direct_invalid_row(
+                run_id,
+                seed_row,
+                str(reason or "direct invoke failed"),
+                model_id=model_id,
+                phase=request_phase,
+                raw_payload=raw_output,
+            )
+        ]
+
+    try:
+        row = _prediction_row_from_payload(
+            run_id,
+            request_phase=request_phase,
+            output_phase=output_phase,
+            manifest_row=manifest_row,
+            payload=payload,
+        )
+        return [row], []
+    except Exception as exc:  # noqa: BLE001
+        return [], [
+            _direct_invalid_row(
+                run_id,
+                seed_row,
+                f"schema validation failed: {exc}",
+                model_id=model_id,
+                phase=request_phase,
+                raw_payload=payload,
+            )
+        ]
+
+
+def _repair_experiment_a_edit_seed_direct(
+    run_id: str,
+    seed_row: dict,
+    config: dict,
+) -> tuple[list[dict], list[dict]]:
+    manifest_row = seed_row.get("manifest_row")
+    model_id = str(seed_row.get("model_id") or "")
+    if not isinstance(manifest_row, dict) or not model_id:
+        return [], [_carry_forward_invalid_row(run_id, seed_row)]
+
+    prompt = _build_experiment_a_edit_prompt(manifest_row)
+    payload, reason, raw_output = _invoke_direct_payload(model_id, prompt, 0.0)
+    if payload is None:
+        return [], [
+            _direct_invalid_row(
+                run_id,
+                seed_row,
+                str(reason or "direct invoke failed"),
+                model_id=model_id,
+                phase="experiment_a",
+                raw_payload=raw_output,
+            )
+        ]
+
+    edited, validation_reason = _experiment_a_edit_row_from_payload(manifest_row, payload)
+    if edited is None:
+        return [], [
+            _direct_invalid_row(
+                run_id,
+                seed_row,
+                str(validation_reason),
+                model_id=model_id,
+                phase="experiment_a",
+                raw_payload=payload,
+            )
+        ]
+
+    repaired_rows: list[dict] = []
+    invalid_rows: list[dict] = []
+    for predictor_model in list(config.get("models", [])):
+        for condition_type in ("info_plus", "info_minus"):
+            prediction_seed = {
+                "record_id": seed_row.get("record_id"),
+                "logical_phase": "experiment_a",
+                "manifest_phase": "experiment_a_predict",
+                "model_id": predictor_model,
+                "manifest_row": {
+                    "source_record_id": edited["source_record_id"],
+                    "generator_model": edited["generator_model"],
+                    "predictor_model": predictor_model,
+                    "prompt_type": edited["prompt_type"],
+                    "target": edited["target"],
+                    "temperature": edited["temperature"],
+                    "generated_sentence": edited[condition_type],
+                    "expected_label": edited["expected_label"],
+                    "condition_type": condition_type,
+                },
+                "source_invalid_row": _seed_source_invalid_row(seed_row),
+            }
+            rows, invalid = _repair_prediction_seed_direct(
+                run_id,
+                prediction_seed,
+                request_phase="experiment_a_predict",
+                output_phase="experiment_a",
+            )
+            repaired_rows.extend(rows)
+            invalid_rows.extend(invalid)
+    return repaired_rows, invalid_rows
+
+
+def _run_direct_repair_all_invalid(run_id: str, config: dict) -> dict[str, object]:
+    parent_run_id = str(config.get("parent_run_id") or "")
+    if not parent_run_id:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="parent_run_id is required for direct repair run",
+            retryable=False,
+            category="validation",
+        )
+
+    seed_rows = _load_repair_seed_rows(config)
+    if not seed_rows:
+        raise PipelineError(
+            step="STUDY1_ENUMERATE",
+            reason="repair seed is empty",
+            retryable=False,
+            category="validation",
+        )
+
+    repaired_by_phase = {phase: [] for phase in FINAL_REPAIR_PHASES}
+    invalid_by_phase = {phase: [] for phase in FINAL_REPAIR_PHASES}
+
+    for seed_row in seed_rows:
+        logical_phase = str(seed_row.get("logical_phase") or "")
+        if logical_phase not in repaired_by_phase:
+            continue
+        if not bool(seed_row.get("repairable")):
+            invalid_by_phase[logical_phase].append(_carry_forward_invalid_row(run_id, seed_row))
+            continue
+
+        manifest_phase = str(seed_row.get("manifest_phase") or "")
+        if manifest_phase == "study1":
+            repaired, invalid = _repair_study1_seed_direct(run_id, seed_row)
+        elif manifest_phase in {"study2_within", "study2_across"}:
+            repaired, invalid = _repair_prediction_seed_direct(
+                run_id,
+                seed_row,
+                request_phase=manifest_phase,
+                output_phase=manifest_phase,
+            )
+        elif manifest_phase == "experiment_a_edit":
+            repaired, invalid = _repair_experiment_a_edit_seed_direct(run_id, seed_row, config)
+        elif manifest_phase == "experiment_a_predict":
+            repaired, invalid = _repair_prediction_seed_direct(
+                run_id,
+                seed_row,
+                request_phase="experiment_a_predict",
+                output_phase="experiment_a",
+            )
+        elif manifest_phase == "experiment_d_predict":
+            repaired, invalid = _repair_prediction_seed_direct(
+                run_id,
+                seed_row,
+                request_phase="experiment_d_predict",
+                output_phase="experiment_d",
+            )
+        else:
+            repaired, invalid = [], [_carry_forward_invalid_row(run_id, seed_row)]
+
+        repaired_by_phase[logical_phase].extend(repaired)
+        invalid_by_phase[logical_phase].extend(invalid)
+
+    phase_counts: dict[str, int] = {}
+    invalid_counts: dict[str, int] = {}
+    merged_phase_rows: dict[str, list[dict]] = {}
+    for phase in FINAL_REPAIR_PHASES:
+        merged_rows = _merge_rows_by_record_id(
+            _load_normalized_rows(parent_run_id, phase),
+            repaired_by_phase[phase],
+        )
+        merged_phase_rows[phase] = merged_rows
+        _write_normalized_phase_rows(run_id, phase, merged_rows)
+        if invalid_by_phase[phase]:
+            _write_invalid_rows(run_id, phase, invalid_by_phase[phase])
+        phase_counts[phase] = len(merged_rows)
+        invalid_counts[phase] = len(invalid_by_phase[phase])
+
+    return {
+        "phase_counts": phase_counts,
+        "invalid_counts": invalid_counts,
+        "study1_rows": merged_phase_rows["study1"],
+    }
+
+
 def _materialize_and_normalize_study1(run_id: str) -> tuple[list[dict], list[dict]]:
     _materialize_dryrun_batch_output_for_phase(run_id, "study1")
     return _normalize_study1(run_id)
@@ -2567,6 +3004,52 @@ def _run_repair_study1(
     return _run_child_context(context, "study1_repair", _child)
 
 
+def _run_repair_direct_invalids(
+    context: DurableContext | None,
+    run_id: str,
+    trace_id: str,
+    workflow_state: dict,
+    config: dict,
+):
+    def _child(child_context: DurableContext | None):
+        prepared = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="REPAIR",
+            step="STUDY1_ENUMERATE",
+            func=lambda: {"target_count": len(_load_repair_seed_rows(config))},
+        )
+        if int(prepared.get("target_count", 0)) <= 0:
+            raise PipelineError(
+                step="STUDY1_ENUMERATE",
+                reason="repair target count must be greater than zero",
+                retryable=False,
+                category="validation",
+            )
+
+        repaired = _execute_workflow_step(
+            child_context,
+            run_id=run_id,
+            trace_id=trace_id,
+            workflow_state=workflow_state,
+            phase="REPAIR",
+            step="STUDY1_NORMALIZE",
+            func=lambda: _run_direct_repair_all_invalid(run_id, config),
+        )
+        workflow_state["phase_counts"].update(
+            {key: int(value) for key, value in dict(repaired["phase_counts"]).items()}
+        )
+        workflow_state["invalid_counts"].update(
+            {key: int(value) for key, value in dict(repaired["invalid_counts"]).items()}
+        )
+        workflow_state["study1_rows_for_downstream"] = list(repaired["study1_rows"])
+        workflow_state["study1_rows_for_reports"] = list(repaired["study1_rows"])
+
+    return _run_child_context(context, "direct_invalid_repair", _child)
+
+
 def _run_study2(context: DurableContext | None, run_id: str, trace_id: str, workflow_state: dict):
     def _child(child_context: DurableContext | None):
         config = _load_config(run_id)
@@ -2841,7 +3324,13 @@ def handler(event, context: DurableContext | None):
     try:
         config = _load_config(run_id)
         if _is_repair_run(config):
-            _run_repair_study1(context, run_id, trace_id, workflow_state, config)
+            if (
+                str(config.get("repair_mode")) == "direct_rerun"
+                and str(config.get("repair_phase")) == "all"
+            ):
+                _run_repair_direct_invalids(context, run_id, trace_id, workflow_state, config)
+            else:
+                _run_repair_study1(context, run_id, trace_id, workflow_state, config)
             if bool(config.get("rebuild_downstream")):
                 _run_study2(context, run_id, trace_id, workflow_state)
                 _run_experiment_a_workflow(context, run_id, trace_id, workflow_state)

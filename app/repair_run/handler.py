@@ -27,10 +27,21 @@ ARTIFACTS_BUCKET = os.environ["ARTIFACTS_BUCKET"]
 ORCHESTRATOR_ARN = os.environ["ORCHESTRATOR_ARN"]
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "ReflectBench/Run")
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "PARTIAL", "CANCELLED"}
+DIRECT_REPAIR_PHASES = (
+    "study1",
+    "study2_within",
+    "study2_across",
+    "experiment_a",
+    "experiment_d",
+)
 
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _request_hash(parent_run_id: str, payload: RepairRunCreateRequest | dict) -> str:
@@ -130,6 +141,44 @@ def _load_manifest_index(run_id: str, phase: str) -> dict[str, dict]:
     return indexed
 
 
+def _request_row_id(phase: str, row: dict) -> str:
+    if phase == "study1":
+        return str(row["record_id"])
+    if phase == "experiment_a_edit":
+        seed = "|".join(
+            [
+                phase,
+                str(row.get("source_record_id", "")),
+                str(row.get("generator_model", "")),
+                str(row.get("editor_model", "")),
+            ]
+        )
+        return _sha256(seed)
+    seed = "|".join(
+        [
+            phase,
+            str(row.get("source_record_id", "")),
+            str(row.get("generator_model", "")),
+            str(row.get("predictor_model", "")),
+            str(row.get("condition_type", "")),
+        ]
+    )
+    return _sha256(seed)
+
+
+def _load_manifest_request_index(run_id: str, phase: str) -> dict[str, dict]:
+    manifest_keys = [
+        key for key in _s3_list(f"runs/{run_id}/manifests/{phase}/") if key.endswith(".jsonl")
+    ]
+    indexed: dict[str, dict] = {}
+    for key in manifest_keys:
+        for row in _s3_get_jsonl(key):
+            request_id = _request_row_id(phase, row)
+            if request_id:
+                indexed[request_id] = row
+    return indexed
+
+
 def _fallback_invalid_output(record_id: str, reason: str) -> dict:
     return {
         "recordId": record_id,
@@ -152,7 +201,121 @@ def _parse_invalid_output(record_id: str, invalid_row: dict) -> dict:
     return parsed
 
 
+def _direct_manifest_phase(logical_phase: str, invalid_row: dict) -> str | None:
+    if logical_phase in {"study1", "study2_within", "study2_across"}:
+        return logical_phase
+
+    source_phase = str(invalid_row.get("phase") or "").strip()
+    if logical_phase == "experiment_a":
+        if source_phase == "experiment_a_predict":
+            return "experiment_a_predict"
+        return "experiment_a_edit"
+    if logical_phase == "experiment_d":
+        if source_phase == "experiment_d_predict":
+            return "experiment_d_predict"
+        return None
+    return None
+
+
+def _repair_model_id(manifest_phase: str, manifest_row: dict) -> str:
+    if manifest_phase == "study1":
+        return str(manifest_row.get("model_id") or "")
+    if manifest_phase == "experiment_a_edit":
+        return str(manifest_row.get("editor_model") or "")
+    return str(manifest_row.get("predictor_model") or "")
+
+
+def _request_id_candidates(invalid_row: dict, invalid_output: dict) -> list[str]:
+    candidates: list[str] = []
+    for value in (
+        invalid_output.get("recordId"),
+        invalid_output.get("record_id"),
+        invalid_row.get("record_id"),
+    ):
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+    return list(dict.fromkeys(candidates))
+
+
+def _build_direct_seed_rows(
+    parent_run_id: str, request: RepairRunCreateRequest
+) -> tuple[list[dict], list[str]]:
+    model_filter = set(request.models or [])
+    record_filter = set(request.record_ids or [])
+    manifest_cache: dict[str, dict[str, dict]] = {}
+
+    seed_rows: list[dict] = []
+    source_invalid_keys: list[str] = []
+    for logical_phase in DIRECT_REPAIR_PHASES:
+        invalid_keys = [
+            key
+            for key in _s3_list(f"runs/{parent_run_id}/invalid/{logical_phase}/")
+            if key.endswith(".jsonl")
+        ]
+        for key in invalid_keys:
+            for index, invalid_row in enumerate(_s3_get_jsonl(key), start=1):
+                record_id = str(invalid_row.get("record_id") or "").strip()
+                if record_filter and record_id not in record_filter:
+                    continue
+
+                invalid_output = _parse_invalid_output(
+                    record_id or f"{logical_phase}:{index}",
+                    invalid_row,
+                )
+                manifest_phase = _direct_manifest_phase(logical_phase, invalid_row)
+                manifest_row = None
+                model_id = ""
+                request_id = ""
+
+                if manifest_phase is not None:
+                    manifest_index = manifest_cache.setdefault(
+                        manifest_phase,
+                        _load_manifest_request_index(parent_run_id, manifest_phase),
+                    )
+                    for candidate in _request_id_candidates(invalid_row, invalid_output):
+                        manifest_row = manifest_index.get(candidate)
+                        if manifest_row is not None:
+                            request_id = candidate
+                            model_id = _repair_model_id(manifest_phase, manifest_row)
+                            break
+
+                if model_filter and model_id and model_id not in model_filter:
+                    continue
+                if model_filter and not model_id:
+                    invalid_model = str(invalid_row.get("model") or "").strip()
+                    if invalid_model not in model_filter:
+                        continue
+
+                seed_row = {
+                    "record_id": record_id or f"{logical_phase}:{index}",
+                    "logical_phase": logical_phase,
+                    "manifest_phase": manifest_phase,
+                    "source_invalid_key": key,
+                    "invalid_output": invalid_output,
+                    "source_invalid_row": invalid_row,
+                    "repairable": bool(manifest_row and model_id),
+                }
+                if manifest_row and model_id:
+                    seed_row["manifest_row"] = manifest_row
+                    seed_row["model_id"] = model_id
+                    seed_row["request_id"] = request_id
+                else:
+                    seed_row["carry_forward_reason"] = (
+                        "parent manifest row is missing for direct repair"
+                        if manifest_phase is not None
+                        else "direct repair is not supported for this invalid row"
+                    )
+
+                seed_rows.append(seed_row)
+                source_invalid_keys.append(key)
+
+    return seed_rows, list(dict.fromkeys(source_invalid_keys))
+
+
 def _build_seed_rows(parent_run_id: str, request: RepairRunCreateRequest) -> tuple[list[dict], list[str]]:
+    if request.mode == "direct_rerun":
+        return _build_direct_seed_rows(parent_run_id, request)
+
     model_filter = set(request.models or [])
     record_filter = set(request.record_ids or [])
     manifest_index = _load_manifest_index(parent_run_id, request.phase)
