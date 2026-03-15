@@ -3,11 +3,11 @@ id: DD-APP-API-001
 title: run制御APIアプリ実装詳細
 doc_type: API詳細
 phase: DD
-version: 1.2.0
+version: 1.4.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-11'
+updated: '2026-03-14'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
@@ -20,6 +20,10 @@ related:
   - '[[RQ-FR-004]]'
   - '[[RQ-FR-015]]'
   - '[[RQ-FR-016]]'
+  - '[[RQ-FR-017]]'
+  - '[[RQ-FR-018]]'
+  - '[[RQ-FR-019]]'
+  - '[[RQ-FR-020]]'
 tags:
   - llm-temp-introspection
   - DD
@@ -30,7 +34,7 @@ tags:
 ## 詳細仕様
 - API 契約は [[DD-INF-API-001]] を正本とし、本書はハンドラ内部の処理順と検証規約を定義する。
 - 外部応答は `snake_case` 固定とし、内部モデルとの差分は serializer で統一変換する。
-- 状態参照の正本は DynamoDB、成果物本文の正本は S3 とし、ハンドラは両者を用途別に参照する。
+- 状態参照と canonical result の正本は DynamoDB、raw / report artifact の正本は S3 とし、ハンドラは両者を用途別に参照する。
 
 ## ハンドラ処理
 ### `POST /runs`
@@ -45,7 +49,24 @@ tags:
 2. DynamoDB から `RunStatus` を取得し [[RQ-GL-003|phase]]/state/progress を整形する。
 3. `last_error` は欠損時 `null` を返す。
 4. `parent_run_id` / repair 条件がある場合は `lineage` / `repair` へ整形する。
-5. `durable_execution_arn` がある場合のみ durable execution 状態を補強する。
+5. `cancel_requested_at` 系フィールドがある場合は `cancel` へ整形する。
+6. `durable_execution_arn` がある場合のみ durable execution 状態を補強する。
+
+### `GET /runs/{run_id}/results`
+1. path の `run_id` を検証する。
+2. query の `phase`, `experiment_id`, `limit`, `next_token` を検証する。
+3. `experiment_result_table` を `run_id` で query し、必要なら phase prefix / exact experiment_id で絞り込む。
+4. DDB item を `ExperimentResultView` へ変換し、`prompt`, `normalized_result`, `source`, `metadata` を整形する。
+5. `returned_count` と `next_token` を付与して返す。
+
+### `POST /runs/{run_id}/cancel`
+1. path の `run_id` を検証する。
+2. request を `RunCancelRequest` へパースし、`reason` 長を検証する。
+3. DynamoDB から現在の `RunStatus` を取得し、未知 `run_id` は `404`、`SUCCEEDED/FAILED/PARTIAL` は `409` を返す。
+4. 現在状態が `CANCELLING/CANCELLED` の場合は新規停止処理を再発行せず、現在状態を冪等応答する。
+5. `QUEUED/RUNNING` の場合は条件付き更新で `state=CANCELLING` とし、`cancel_requested_at`, `cancel_reason`, `cancel_requested_phase`, `cancel_requested_step` を保存する。
+6. 非同期 cancel worker を起動し、durable execution 停止と進行中 Bedrock Batch 停止を要求する。
+7. cancel worker は完了時に `state=CANCELLED` を確定し、既に通常終端へ到達している場合はその状態を上書きしない。
 
 ### `POST /runs/{run_id}/repairs`
 1. path の `run_id` を親run IDとして検証する。
@@ -74,14 +95,19 @@ tags:
 - 構文検証 -> 業務検証 -> 競合検証の順で評価する。
 - 最初の失敗理由を Problem Details 相当で返す。
 - 未知 `run_id` は `404` とし、内部エラー詳細は露出しない。
+- cancel 受理は条件付き更新を使い、通常完了との競合で誤って `CANCELLED` を上書きしない。
 
 ## 受入条件
-- 4 API すべてで固定制約とエラー契約が一貫している。
+- 7 API すべてで固定制約とエラー契約が一貫している。
 - 同一 `idempotency_key` の再送で重複起動が発生しない。
+- cancel API が `QUEUED/RUNNING` を `CANCELLING` へ遷移させ、再要求で冪等応答できる。
+- results API が DynamoDB canonical result を正規化 view として返せる。
 - repair run で parent/child 関係と repair 条件が状態/成果物APIから把握できる。
 - run 一覧APIから run_id と S3 状況が把握できる。
 
 ## 変更履歴
+- 2026-03-14: `GET /runs/{run_id}/results` の handler 手順と DynamoDB canonical result serializer を追加 [[RQ-RDR-005]]
+- 2026-03-13: cancel API の受付手順、cancel メタデータ整形、競合更新ルールを追加 [[RQ-FR-017]]
 - 2026-03-12: repair rerun の Batch 制約検証を追加 [[DD-INF-DEP-002]]
 - 2026-03-11: repair run API の受付手順と lineage/repair 整形処理を追記 [[RQ-RDR-003]]
 - 2026-03-06: `GET /runs` の処理順を追加し、status の durable 補強処理を追記 [[DD-INF-API-001]]

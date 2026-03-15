@@ -3,19 +3,23 @@ id: BD-INF-DEP-001
 title: コンピュートと配備設計（Bedrock Batch + Durable）
 doc_type: デプロイ設計
 phase: BD
-version: 1.0.3
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-06'
+updated: '2026-03-14'
 up:
   - '[[RQ-PP-001]]'
   - '[[RQ-SC-001]]'
   - '[[RQ-PC-001]]'
 related:
   - '[[BD-SYS-ADR-001]]'
+  - '[[BD-SYS-ADR-003]]'
   - '[[RQ-FR-001]]'
   - '[[RQ-FR-014]]'
+  - '[[RQ-FR-018]]'
+  - '[[RQ-FR-019]]'
+  - '[[RQ-FR-020]]'
   - '[[RQ-COST-001-01]]'
   - '[[DD-INF-DEP-001]]'
   - '[[DD-INF-DEP-002]]'
@@ -42,7 +46,7 @@ tags:
 
 ## 設計前提（固定）
 - リージョン: `ap-southeast-2`
-- 実行方式: Bedrock Batch Inference（同期推論は不採用）
+- 実行方式: 主経路は Bedrock Batch Inference、欠損補完は Bedrock Runtime 直呼び出し
 - 長時間制御: Lambda Durable Functions
 - 利用者: [[RQ-SH-001|管理者]]のみ
 - 運用形態: 常時開放しない（必要時のみ起動）
@@ -50,7 +54,7 @@ tags:
 
 ## 必須設計項目（BDで必ず決める）
 - 実行基盤: API Gateway + Lambda + S3 + DynamoDB + Bedrock Batch + CloudWatch（任意で SNS）。
-- 状態管理: DynamoDB は run summary projection、S3 は成果物本体、durable runtime はワークフロー進行の正本とする。
+- 状態管理: DynamoDB は `run_control_table` と `experiment_result_table` の2系統で run 状態と canonical result を保持し、S3 は raw artifact / report / audit mirror を保持する。
 - 長時間制御: `orchestrator_durable_fn` を Lambda Durable Functions 前提で作成し、alias `live` 経由で起動する。
 - モデル固定: `apac.amazon.nova-micro-v1:0`, `google.gemma-3-12b-it`, `mistral.ministral-3-8b-instruct`, `qwen.qwen3-32b-v1:0`。
 - フェーズ境界: Study1 -> Study2(within/across) -> 実験A(edit/predict) -> 実験D([[RQ-GL-010|blind]]/[[RQ-GL-011|wrong-label]]) -> report。
@@ -63,8 +67,9 @@ Client (Admin only)
     -> start_run_fn
       -> orchestrator_durable_fn:live
          -> Bedrock Batch Inference
-         -> S3 (config / manifests / output / normalized / reports / invalid)
-         -> DynamoDB (run summary projection)
+         -> Bedrock Runtime (missing-result direct rerun)
+         -> S3 (config / manifests / output / normalized-mirror / reports / invalid)
+         -> DynamoDB (run summary projection / canonical experiment results)
          -> CloudWatch Logs / Metrics
          -> SNS or EventBridge (optional)
     -> status_fn
@@ -73,8 +78,10 @@ Client (Admin only)
     -> list_runs_fn
       -> DynamoDB projection
       -> S3 status summary
+    -> results_fn
+      -> DynamoDB canonical result query
     -> artifacts_fn
-      -> S3 artifact keys
+      -> S3 raw/report artifact keys
 ```
 
 ## AWS リソース
@@ -86,9 +93,11 @@ Client (Admin only)
 | Lambda Alias | `live` | durable 起動先の固定 |
 | Lambda | `list_runs_fn` | run 一覧と S3 状況サマリ API |
 | Lambda | `status_fn` | projection / durable 状態参照 API |
+| Lambda | `results_fn` | canonical experiment result 取得 API |
 | Lambda | `artifacts_fn` | 成果物一覧 API |
 | API Gateway | HTTP API | `/runs` 系エンドポイント提供 |
 | DynamoDB | `run_control_table` | `RunSummary` / `idempotency` の正本 |
+| DynamoDB | `experiment_result_table` | 正規化済み実験結果の canonical source |
 | IAM | Lambda実行ロール / Bedrockサービスロール | 最小権限で S3/Bedrock/durable を制御 |
 | CloudWatch | Logs / Alarms | 失敗検知、実行監視 |
 | SNS (任意) | 通知トピック | 完了/失敗通知 |
@@ -98,6 +107,7 @@ Client (Admin only)
 - `runs/{run_id}/manifests/{phase}/{model}/part-xxxxx.jsonl`
 - `runs/{run_id}/batch-output/{phase}/{model}/...`
 - `runs/{run_id}/normalized/{phase}/...jsonl`
+- `runs/{run_id}/invalid/{phase}/{model}/...jsonl`
 - `runs/{run_id}/reports/...`
 - `runs/{run_id}/tmp/...`
 
@@ -114,8 +124,10 @@ Client (Admin only)
 - DD に引き渡す実行フェーズ、S3 契約、IAM 契約が揃っている。
 - self-invoke や DDB lease に依存しない durable orchestration である。
 - 管理者が run 一覧と S3 保存状況を API だけで確認できる。
+- 管理者が正規化済み実験結果を DynamoDB canonical result API から取得できる。
 
 ## 変更履歴
+- 2026-03-14: canonical result を `experiment_result_table` へ移し、`results_fn` と direct rerun 補完を追加 [[BD-SYS-ADR-003]]
 - 2026-03-12: Bedrock Batch shard の `100..500` 保証と submit 前 validation 方針を追記 [[DD-INF-DEP-002]]
 - 2026-03-06: `list_runs_fn` と `GET /runs` の運用APIを追加 [[DD-INF-API-001]]
 - 2026-03-06: `orchestrator_durable_fn:live` と projection ベースの durable 構成へ更新 [[DD-INF-DEP-001]]

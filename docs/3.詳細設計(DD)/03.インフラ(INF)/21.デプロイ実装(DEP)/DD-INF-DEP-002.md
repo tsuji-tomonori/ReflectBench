@@ -3,11 +3,11 @@ id: DD-INF-DEP-002
 title: デプロイ詳細（実行パラメータと運用制約）
 doc_type: デプロイ詳細
 phase: DD
-version: 1.0.4
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-01'
+updated: '2026-03-14'
 up:
   - '[[BD-INF-DEP-001]]'
   - '[[BD-INF-DEP-002]]'
@@ -44,6 +44,7 @@ tags:
 | durable timeout | `7 days` | 長時間 [[RQ-GL-002|run]] を分割せず完走するため |
 | durable retention | `30 days` | 再調査と再実行判断に必要な保持期間 |
 | editor model | `apac.amazon.nova-micro-v1:0` | 追加実験Aの固定前提 |
+| direct rerun max attempts | `2` | Batch 欠損補完と無限再試行防止の両立 |
 
 ## 運用制約
 - 単一環境のみで運用し、環境分割を行わない。
@@ -93,8 +94,9 @@ tags:
 
 ## 状態管理方針
 - `RunStatus` と `idempotency_key` は DynamoDB（`run_control_table`）で管理する。
-- 成果物本文は S3 を正本とし、DynamoDB にはキー参照（`artifacts_index`）のみ保持する。
-- 状態更新は「S3 書き込み成功後に DynamoDB 更新」を基本順序とする。
+- 正規化済み実験結果は DynamoDB（`experiment_result_table`）を正本とする。
+- 成果物本文は S3 を raw/report/audit の正本とし、`normalized/` は mirror として保持できる。
+- 状態更新は「raw artifact 書き込み -> canonical result upsert -> report 出力 -> run summary 更新」を基本順序とする。
 
 ## モデルルーティング
 - `NOVA_MICRO` -> `apac.amazon.nova-micro-v1:0`
@@ -127,19 +129,22 @@ tags:
 
 ## API 応答設計（抜粋）
 - `GET /runs/{run_id}` は `phase`, `state`, `progress`, `last_error` を返す。
+- `GET /runs/{run_id}/results` は canonical result を返す。
 - `GET /runs/{run_id}/artifacts` は `reports`, `normalized`, `invalid` のキー一覧を返す。
 
 ## 再試行方針
 - Bedrock 側失敗: [[RQ-GL-004|shard]] 単位で 1 回再試行。
 - Lambda 一時失敗: exponential backoff で step 再実行。
-- 部分失敗許容: `invalid/` を除外して集計継続し、`run_manifest.json` に除外件数を明記。
+- direct rerun: canonical result に不足した `experiment_id` のみ最大 `2` 回まで再実行する。
+- 部分失敗許容: backfill 後も不足が残る場合のみ `PARTIAL` とし、`run_manifest.json` に不足件数を明記する。
 
 ## 受入確認
 - 1 [[RQ-GL-002|run]] あたりの LLM call 総数（73,200）と [[RQ-GL-003|phase]] 別件数が [[RQ-GL-002|run]] [[RQ-GL-005|manifest]] で追跡できる。
 - 追加実験 D（[[RQ-GL-010|blind]] / [[RQ-GL-011|wrong-label]]）の成果物が [[RQ-GL-003|phase]] 別に分離される。
-- 集計 CSV と source [[RQ-GL-002|run]] の関連が `record_id` で逆引きできる。
+- 集計 CSV と source [[RQ-GL-002|run]] の関連が `experiment_result_table` の `experiment_id` で逆引きできる。
 
 ## 変更履歴
+- 2026-03-14: canonical result table と direct rerun 補完パラメータを追加 [[RQ-RDR-005]]
 - 2026-03-12: Bedrock Batch shard の再配分と submit 前 validation 条件を追記 [[BD-INF-DEP-001]]
 - 2026-03-01: poll interval の意味を non-blocking 再確認間隔へ明確化 [[DD-INF-DEP-001]]
 - 2026-02-28: `plan.md` ベースのモデル費見積もりと phase 別費用を追加し、RQ-COST トレースを追記 [[RQ-RDR-002]]

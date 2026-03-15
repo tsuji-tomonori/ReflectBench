@@ -3,17 +3,18 @@ id: DD-APP-ERR-001
 title: ログ・エラー処理詳細
 doc_type: エラー詳細
 phase: DD
-version: 1.1.0
+version: 1.2.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-11'
+updated: '2026-03-13'
 up:
   - '[[BD-INF-DEP-001]]'
 related:
   - '[[DD-INF-MON-001]]'
   - '[[DD-INF-API-001]]'
   - '[[DD-APP-API-001]]'
+  - '[[RQ-FR-017]]'
   - '[[RQ-OBS-001-01]]'
   - '[[RQ-SEC-001-01]]'
 tags:
@@ -45,6 +46,8 @@ tags:
 
 ## 失敗時動作
 - `validation`: `400` または `invalid/` へ退避して継続。
+- cancel API の `validation` には、未知 `run_id`、`reason` 長超過、`SUCCEEDED/FAILED/PARTIAL` への停止要求を含める。
+- `CANCELLING/CANCELLED` への再要求は validation error とせず、冪等成功として扱う。
 - repair API の `validation` には、親run未終端、対象 invalid 不在、重複 repair 要求を含める。
 - Bedrock Batch 投入前 validation には、model/phase ごとの件数が `100..shard_size` 制約へ分割不能なケースを含める。
 - `dependency`: backoff 再試行後、上限到達で `FAILED`。
@@ -56,6 +59,7 @@ tags:
 - 可観測性メトリクスとエラー分類が矛盾しない。
 
 ## 変更履歴
+- 2026-03-13: cancel API 固有の validation / 冪等成功ルールを追記 [[RQ-FR-017]]
 - 2026-03-12: Bedrock Batch shard 不成立時の validation エラー条件を追記 [[DD-INF-DEP-002]]
 - 2026-03-11: repair API 固有の validation エラー条件を追記 [[RQ-RDR-003]]
 - 2026-02-28: 初版作成（ログ相関キーとエラー分類規約を定義） [[BD-SYS-ADR-001]]

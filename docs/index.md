@@ -3,11 +3,11 @@ id: index
 title: ホーム
 doc_type: ホーム
 phase: RQ
-version: 1.0.3
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-01'
+updated: '2026-03-14'
 up: []
 related:
   - '[[RQ-PP-001]]'
@@ -20,10 +20,12 @@ related:
   - '[[RQ-AV-001-01]]'
   - '[[RQ-RDR-001]]'
   - '[[RQ-RDR-002]]'
+  - '[[RQ-RDR-005]]'
   - '[[RQ-DG-001]]'
   - '[[BD-INF-DEP-001]]'
   - '[[BD-INF-DEP-002]]'
   - '[[BD-SYS-ADR-001]]'
+  - '[[BD-SYS-ADR-003]]'
   - '[[DD-INF-DEP-001]]'
   - '[[DD-INF-DEP-002]]'
   - '[[DD-APP-OVR-001]]'
@@ -47,10 +49,12 @@ tags:
 - [[RQ-AV-001-01]]
 - [[RQ-RDR-001]]
 - [[RQ-RDR-002]]
+- [[RQ-RDR-005]]
 - [[RQ-DG-001]]
 - [[BD-INF-DEP-001]]
 - [[BD-INF-DEP-002]]
 - [[BD-SYS-ADR-001]]
+- [[BD-SYS-ADR-003]]
 - [[DD-INF-DEP-001]]
 - [[DD-INF-DEP-002]]
 - [[OPSREL-RUN-001]]
@@ -62,14 +66,16 @@ tags:
 4. [[RQ-GL-001]]（用語）
 5. [[RQ-FR-001]]（機能要求）
 6. [[RQ-AV-001-01]]（非機能要求）
-7. [[BD-INF-DEP-001]]（単一リージョンのデプロイ基本設計）
-8. [[BD-INF-DEP-002]]（CI/CD と品質ゲート）
-9. [[DD-INF-DEP-001]]（Durable + Batch 実装詳細）
-10. [[DD-INF-DEP-002]]（運用パラメータと再試行詳細）
-11. [[DD-APP-OVR-001]]（アプリ詳細総論）
-12. [[DD-APP-API-001]]（[[RQ-GL-002|run]]制御APIアプリ実装）
-13. [[DD-APP-DATA-001]]（アプリデータ契約）
-14. [[OPSREL-RUN-001]]（運用ランブック）
+7. [[RQ-RDR-005]]（DynamoDB canonical result への要求決定）
+8. [[BD-INF-DEP-001]]（単一リージョンのデプロイ基本設計）
+9. [[BD-SYS-ADR-003]]（canonical result table の採用判断）
+10. [[BD-INF-DEP-002]]（CI/CD と品質ゲート）
+11. [[DD-INF-DEP-001]]（Durable + Batch + direct rerun 実装詳細）
+12. [[DD-INF-DEP-002]]（運用パラメータと再試行詳細）
+13. [[DD-APP-OVR-001]]（アプリ詳細総論）
+14. [[DD-APP-API-001]]（[[RQ-GL-002|run]]制御APIアプリ実装）
+15. [[DD-APP-DATA-001]]（アプリデータ契約）
+16. [[OPSREL-RUN-001]]（運用ランブック）
 
 ## 注記
 - `docs/2.基本設計(BD)/03.アプリ(APP)` 配下は旧文脈の参考文書を含む。現行スコープの正本は RQ-SC/DD-INF/DD-APP を優先する。
@@ -77,6 +83,7 @@ tags:
 - 実行方法と障害切り分けは [[OPSREL-RUN-001]] に集約しており、CLI 手順（run 開始/監視）とデバッグ手順（Logs/S3/DynamoDB）を参照する。
 
 ## 変更履歴
+- 2026-03-14: DynamoDB canonical result 方針の RDR/ADR 導線を追加し、推奨読書順を更新 [[RQ-RDR-005]]
 - 2026-03-01: 運用ランブック（OPSREL-RUN-001）に実行/デバッグ手順を追加した旨を注記へ反映 [[RQ-RDR-002]]
 - 2026-02-28: 正本分担（plan /.ai_workspace）を注記へ追加 [[RQ-RDR-002]]
 - 2026-02-28: 現行スコープに合わせて入口からBD-APP導線を外し、旧文脈は注記へ集約 [[RQ-RDR-002]]

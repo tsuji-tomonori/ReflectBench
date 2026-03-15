@@ -3,11 +3,11 @@ id: UT-TRC-001
 title: UTケース・ペアワイズ対応マトリクス
 doc_type: 単体テストトレーサビリティ
 phase: UT
-version: 1.1.0
+version: 1.2.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-11'
+updated: '2026-03-13'
 up:
   - '[[UT-PLAN-001]]'
 related:
@@ -23,6 +23,7 @@ related:
   - '[[UT-CASE-BE-005]]'
   - '[[UT-CASE-BE-006]]'
   - '[[UT-CASE-BE-007]]'
+  - '[[UT-CASE-BE-008]]'
   - '[[UT-CASE-APP-001]]'
   - '[[UT-CASE-APP-002]]'
   - '[[UT-CASE-APP-003]]'
@@ -65,6 +66,7 @@ tags:
 | [[RQ-FR-014]] | 成果物6種出力 | [[UT-CASE-APP-007]], [[UT-CASE-BE-006]] |
 | [[RQ-FR-015]] | repair API 起動 | [[UT-CASE-BE-007]] |
 | [[RQ-FR-016]] | repair 系譜/差分追跡 | [[UT-CASE-BE-004]], [[UT-CASE-BE-006]], [[UT-CASE-BE-007]] |
+| [[RQ-FR-017]] | cancel API / 停止状態遷移 | [[UT-CASE-BE-004]], [[UT-CASE-BE-008]] |
 | [[RQ-PS-001-01]] | 24h 完了観点 | [[UT-CASE-APP-001]], [[UT-CASE-APP-008]] |
 | [[RQ-OBS-001-01]] | [[RQ-GL-002|run]] メトリクス可視化 | [[UT-CASE-APP-008]], [[UT-CASE-APP-009]] |
 | [[RQ-SEC-001-01]] | エラー情報統制 | [[UT-CASE-APP-009]], [[UT-CASE-BE-005]] |
@@ -76,6 +78,7 @@ tags:
 | [[UT-CASE-BE-002]] | API入力境界 | [[UT-PW-BE-API-001]] |
 | [[UT-CASE-BE-003]] | 冪等キー条件 | [[UT-PW-BE-API-001]] |
 | [[UT-CASE-BE-007]] | repair API 入力条件 | [[UT-PW-BE-API-001]] |
+| [[UT-CASE-BE-008]] | cancel API 状態条件 | [[UT-PW-BE-API-001]] |
 | [[UT-CASE-APP-001]] | step遷移 | [[UT-PW-APP-ORCH-001]] |
 | [[UT-CASE-APP-002]] | 部分失敗継続 | [[UT-PW-APP-ORCH-001]] |
 | [[UT-CASE-APP-003]] | retry制御 | [[UT-PW-APP-ORCH-001]] |
@@ -91,6 +94,7 @@ tags:
 - 3因子以上の分岐を持つ主要観点（API入力、orchestration、data、error、monitoring）が UT-PW で補完されている。
 
 ## 変更履歴
+- 2026-03-13: cancel API の UT 追跡を追加 [[RQ-FR-017]]
 - 2026-03-12: Bedrock Batch shard 境界の UT 追跡を追加し、FR 範囲表記を更新 [[DD-INF-DEP-002]]
 - 2026-03-11: repair API と lineage/repair 応答の追跡関係を追加 [[RQ-RDR-003]]
 - 2026-02-28: 初版作成（UT-CASE と UT-PW の対応マトリクスを追加） [[RQ-RDR-002]]

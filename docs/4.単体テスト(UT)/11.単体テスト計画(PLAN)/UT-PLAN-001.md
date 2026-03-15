@@ -3,11 +3,11 @@ id: UT-PLAN-001
 title: 単体テスト仕様書（run実行基盤）
 doc_type: 単体テスト計画
 phase: UT
-version: 1.0.4
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-13'
 up:
   - '[[BD-INF-DEP-001]]'
   - '[[BD-INF-DEP-002]]'
@@ -26,6 +26,8 @@ related:
   - '[[DD-APP-ERR-001]]'
   - '[[RQ-FR-001]]'
   - '[[RQ-FR-014]]'
+  - '[[RQ-FR-015]]'
+  - '[[RQ-FR-017]]'
   - '[[RQ-PS-001-01]]'
   - '[[RQ-OBS-001-01]]'
   - '[[RQ-SEC-001-01]]'
@@ -35,6 +37,8 @@ related:
   - '[[UT-CASE-BE-004]]'
   - '[[UT-CASE-BE-005]]'
   - '[[UT-CASE-BE-006]]'
+  - '[[UT-CASE-BE-007]]'
+  - '[[UT-CASE-BE-008]]'
   - '[[UT-CASE-APP-001]]'
   - '[[UT-CASE-APP-002]]'
   - '[[UT-CASE-APP-003]]'
@@ -44,6 +48,7 @@ related:
   - '[[UT-CASE-APP-007]]'
   - '[[UT-CASE-APP-008]]'
   - '[[UT-CASE-APP-009]]'
+  - '[[UT-CASE-APP-010]]'
   - '[[UT-PW-001]]'
   - '[[UT-PW-BE-API-001]]'
   - '[[UT-PW-APP-ORCH-001]]'
@@ -64,7 +69,7 @@ tags:
 - IT へ持ち越す不具合を「契約逸脱」「入力検証不備」「再試行制御不備」に限定する。
 
 ## 対象範囲
-- API: `POST /runs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`
+- API: `POST /runs`, `POST /runs/{run_id}/cancel`, `POST /runs/{run_id}/repairs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`
 - Orchestration: Study1 -> Study2(within/across) -> 実験A -> 実験D -> report の step 制御
 - Data: strict JSON 検証、Pydantic 変換、`invalid/` 退避、`record_id` 生成
 - Error/Log: `run_id` 相関ログ、`retryable` 判定、`RunStatus.last_error` 反映
@@ -78,7 +83,7 @@ tags:
 ## テスト設計方針
 - 技法:
   - 同値分割/境界値: `loops`, `shard_size`, `poll_interval_sec`, `idempotency_key`
-  - 状態遷移: `QUEUED -> RUNNING -> SUCCEEDED|FAILED|PARTIAL`
+  - 状態遷移: `QUEUED -> RUNNING -> SUCCEEDED|FAILED|PARTIAL`, `QUEUED|RUNNING -> CANCELLING -> CANCELLED`
   - エラー推測: parse failure, Bedrock 一時失敗, timeout
   - ペアワイズ: 2-wise 組合せは [[UT-PW-001]] と `UT-PW-*` で管理する。
 - モック方針:
@@ -94,9 +99,11 @@ tags:
 | UT-CASE-BE-001 | `POST /runs` | 正常起動 | 固定条件入力 | `202` + `run_id` + `QUEUED` |
 | UT-CASE-BE-002 | `POST /runs` | バリデーション | `loops != 10` | `400` |
 | UT-CASE-BE-003 | `POST /runs` | 冪等 | 同一 `idempotency_key` 再送 | 同一 `run_id` |
-| UT-CASE-BE-004 | `GET /runs/{run_id}` | 状態参照 | 既存 `run_id` | DynamoDB正本の `phase/state/progress/last_error` を返す |
+| UT-CASE-BE-004 | `GET /runs/{run_id}` | 状態参照 | 既存 `run_id` | DynamoDB正本の `phase/state/progress/last_error` と `lineage/repair/cancel` を返す |
 | UT-CASE-BE-005 | `GET /runs/{run_id}` | Not Found | 未知 `run_id` | `404` |
 | UT-CASE-BE-006 | `GET /runs/{run_id}/artifacts` | 空応答 | 成果物未生成 | `200` + 空配列 |
+| UT-CASE-BE-007 | `POST /runs/{run_id}/repairs` | repair 起動/検証 | 親run条件と repair 条件 | `202` または `409` |
+| UT-CASE-BE-008 | `POST /runs/{run_id}/cancel` | 停止要求/冪等 | `RUNNING`, `CANCELLING`, `SUCCEEDED` | `202`, `200`, `409` |
 | UT-CASE-APP-001 | orchestration | step遷移 | 正常step列 | 最終 `SUCCEEDED` |
 | UT-CASE-APP-002 | orchestration | 部分失敗 | parse失敗混在 | `PARTIAL` + `invalid` 除外継続 |
 | UT-CASE-APP-003 | retry制御 | [[RQ-GL-004|shard]] retry | 1回目失敗 -> 2回目成功 | retry回数が記録される |
@@ -125,11 +132,12 @@ tags:
 4. docs整合チェック（`task docs:guard`）
 
 ## 完了条件
-- `RQ-FR-001..016` の主要受入基準が UT ケースに対応付け済みである。
+- `RQ-FR-001..017` の主要受入基準が UT ケースに対応付け済みである。
 - `RQ-PS-001-01`, `RQ-OBS-001-01`, `RQ-SEC-001-01` の検証観点がケース化されている。
 - 失敗時の再試行/部分成功/エラー記録の挙動が再現可能である。
 
 ## 変更履歴
+- 2026-03-13: cancel API ケースと `CANCELLING/CANCELLED` 状態遷移を追加 [[RQ-FR-017]]
 - 2026-03-12: Bedrock Batch shard 境界の UT ケースを追加し、完了条件の FR 範囲を更新 [[DD-INF-DEP-002]]
 - 2026-02-28: 静的解析手順に `task app:check`（ruff + mypy）を追加 [[RQ-RDR-002]]
 - 2026-02-28: UTトレーサビリティマトリクス（UT-TRC-001）を追加 [[RQ-RDR-002]]

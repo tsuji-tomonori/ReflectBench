@@ -3,11 +3,11 @@ id: OPSREL-RUN-001
 title: Bedrock Batch 実験運用ランブック
 doc_type: 運用ランブック
 phase: AT
-version: 1.0.2
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-03-01'
+updated: '2026-03-13'
 up:
   - '[[DD-INF-DEP-001]]'
   - '[[DD-INF-DEP-002]]'
@@ -33,7 +33,7 @@ tags:
 1. `POST /runs` で [[RQ-GL-002|run]] を開始する。
 2. `GET /runs/{run_id}` で [[RQ-GL-003|phase]] と進捗を監視する。
 3. 完了後 `GET /runs/{run_id}/artifacts` で reports を取得する。
-4. 実験終了後は常時開放を維持せず、不要な待機実行を停止する。
+4. 実験継続が不要になった場合は `POST /runs/{run_id}/cancel` で停止要求を出す。
 
 ## 実行開始時の確認
 - リージョンが `ap-southeast-2` であること。
@@ -85,7 +85,7 @@ RUN_ID=$(curl -sS -X POST "$API_URL/runs" \
 echo "RUN_ID=$RUN_ID"
 ```
 
-### 3) 完了まで監視（`SUCCEEDED`/`PARTIAL`/`FAILED` で停止）
+### 3) 完了まで監視（`SUCCEEDED`/`PARTIAL`/`FAILED`/`CANCELLED` で停止）
 ```bash
 while true; do
   STATUS=$(curl -sS "$API_URL/runs/$RUN_ID")
@@ -93,11 +93,20 @@ while true; do
   PHASE=$(echo "$STATUS" | jq -r '.phase')
   PERCENT=$(echo "$STATUS" | jq -r '.progress.percent // 0')
   echo "state=$STATE phase=$PHASE progress=${PERCENT}%"
-  if [ "$STATE" = "SUCCEEDED" ] || [ "$STATE" = "PARTIAL" ] || [ "$STATE" = "FAILED" ]; then
+  if [ "$STATE" = "SUCCEEDED" ] || [ "$STATE" = "PARTIAL" ] || [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ]; then
     break
   fi
   sleep 30
 done
+```
+
+### 3-b) 途中停止が必要になった場合
+```bash
+curl -sS -X POST "$API_URL/runs/$RUN_ID/cancel" \
+  -H "content-type: application/json" \
+  -d '{
+    "reason": "operator requested stop after anomaly review"
+  }' | jq '{run_id, state, cancel}'
 ```
 
 ### 4) 実行結果の確認
@@ -214,6 +223,11 @@ aws dynamodb scan \
 - `study1_summary.csv`, `study2_within.csv`, `study2_across.csv`, `experiment_a.csv`, `experiment_d.csv` が存在する。
 - `RunStatus.state` が `SUCCEEDED` である。
 
+## 停止完了判定
+- `GET /runs/{run_id}` の `state` が `CANCELLED` である。
+- `cancel.requested_at` と停止理由が参照できる。
+- 以後 `progress` が進まず、新しい Batch submit が増えない。
+
 ## 失敗時対応
 ### Batch job failure
 1. 失敗 [[RQ-GL-004|shard]] を特定する。
@@ -243,6 +257,7 @@ aws dynamodb scan \
 5. `infra/` 未実装時は `infra:deploy:ci` が skeleton 動作（skip）となるため、infra 実装後に本番デプロイ処理へ置換する。
 
 ## 変更履歴
+- 2026-03-13: `POST /runs/{run_id}/cancel` の運用手順と `CANCELLED` 完了判定を追加 [[RQ-FR-017]]
 - 2026-03-01: 実行手順（CLI）とデバッグ手順（Logs/S3/DynamoDB 切り分け）を追記 [[DD-INF-DEP-002]]
 - 2026-02-28: docs-deploy の配信手順（environment 変数/手動 deploy 条件）を追記 [[BD-SYS-ADR-001]]
 - 2026-02-28: 非常時運用（常時開放しない）制約を反映 [[BD-SYS-ADR-001]]

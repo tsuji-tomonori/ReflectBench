@@ -3,11 +3,11 @@ id: RQ-SC-001
 title: llm-temp-introspection スコープ定義
 doc_type: プロジェクトのスコープ
 phase: RQ
-version: 1.0.1
+version: 1.1.0
 status: 下書き
 owner: RQ-SH-001
 created: 2026-02-28
-updated: '2026-02-28'
+updated: '2026-03-13'
 up:
   - '[[RQ-PP-001]]'
 related:
@@ -16,6 +16,8 @@ related:
   - '[[RQ-SH-001]]'
   - '[[RQ-FR-001]]'
   - '[[RQ-FR-014]]'
+  - '[[RQ-FR-015]]'
+  - '[[RQ-FR-017]]'
 tags:
   - llm-temp-introspection
   - RQ
@@ -26,7 +28,7 @@ tags:
 - 実験運用対象を Study1 / Study2 / 追加実験A / 追加実験D に限定し、要求境界を固定する。
 
 ## 対象（In Scope）
-- 実行API（`POST /runs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`）
+- run制御API（`POST /runs`, `POST /runs/{run_id}/cancel`, `POST /runs/{run_id}/repairs`, `GET /runs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`）
 - Bedrock Batch Inference による推論実行
 - Lambda Durable Functions による長時間 orchestration
 - S3 成果物保存（[[RQ-GL-005|manifest]], batch-output, normalized, reports）
@@ -50,11 +52,13 @@ tags:
 
 ## 完了条件（Definition of Done）
 - Study1 / Study2(within+across) / A / D が1 [[RQ-GL-002|run]]で完走できる。
+- 不要または異常な [[RQ-GL-002|run]] を停止要求し、`CANCELLED` まで遷移できる。
 - 失敗時に [[RQ-GL-004|shard]] 単位再試行または `invalid/` 退避で復旧できる。
 - 成果物6種（5 CSV + [[RQ-GL-002|run]]_[[RQ-GL-005|manifest]]）が必ず出力される。
 - コスト最小化方針（[[RQ-PC-001]]）に反しない構成で運用できる。
 
 ## 変更履歴
+- 2026-03-13: cancel API を含む run制御API 範囲と停止完了条件を追加 [[RQ-RDR-004]]
 - 2026-02-28: 正本参照境界（plan /.ai_workspace）を追加 [[RQ-RDR-002]]
 - 2026-02-28: BD-APP旧文書群を非対象へ明示し、現行スコープ（実験運用API中心）との衝突を解消 [[RQ-RDR-002]]
 - 2026-02-28: 制約（単一環境/非常時運用/非冗長/管理者のみ）をスコープへ反映 [[RQ-RDR-002]]
